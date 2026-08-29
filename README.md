@@ -28,8 +28,12 @@ a pinned local Gradle 9.4.1 wrapper:
 ```powershell
 $env:JAVA_HOME = 'C:\Program Files\Android\Android Studio\jbr'
 $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
-.\gradlew.bat clean testDebugUnitTest lintDebug assembleDebug
+.\gradlew.bat clean testDebugUnitTest lintRelease assembleDebug assembleRelease
 ```
 
 Physical USB, Android 14 foreground-launch, speaker routing, and screen-off
 behavior still require the target Samsung device.
+
+Release APKs require an external stable signing key; see
+[`docs/SIGNING.md`](docs/SIGNING.md). This project is licensed under
+LGPL-3.0-or-later; see `LICENSE`.
