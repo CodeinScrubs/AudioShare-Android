@@ -1,0 +1,79 @@
+plugins {
+    id 'com.android.application'
+}
+
+def releaseKeystorePath = providers.environmentVariable('AUDIOSHARE_KEYSTORE_PATH').orNull
+def releaseKeystorePassword = providers.environmentVariable('AUDIOSHARE_KEYSTORE_PASSWORD').orNull
+def releaseKeyAlias = providers.environmentVariable('AUDIOSHARE_KEY_ALIAS').orNull
+def releaseKeyPassword = providers.environmentVariable('AUDIOSHARE_KEY_PASSWORD').orNull
+def hasExternalSigning = [
+        releaseKeystorePath,
+        releaseKeystorePassword,
+        releaseKeyAlias,
+        releaseKeyPassword,
+].every { it != null && !it.isBlank() }
+
+android {
+    namespace 'com.audioshare.usbcompanion'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'com.audioshare.usbcompanion'
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName '0.1.0-poc'
+
+        testInstrumentationRunner 'android.app.Instrumentation'
+    }
+
+    signingConfigs {
+        if (hasExternalSigning) {
+            create('releaseExternal') {
+                storeFile file(releaseKeystorePath)
+                storePassword releaseKeystorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix '.debug'
+            versionNameSuffix '-debug'
+        }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (hasExternalSigning) {
+                signingConfig signingConfigs.getByName('releaseExternal')
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
+}
+
+tasks.register('verifyReleaseSigningInputs') {
+    doLast {
+        if (!hasExternalSigning) {
+            logger.lifecycle('Release signing inputs are absent; assembleRelease will produce an unsigned POC APK.')
+        }
+    }
+}
+
+tasks.matching { it.name == 'preReleaseBuild' }.configureEach {
+    dependsOn 'verifyReleaseSigningInputs'
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+}

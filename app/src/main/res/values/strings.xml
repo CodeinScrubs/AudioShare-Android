@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AudioShare USB</string>
+    <string name="ready_for_host">Ready for the Windows host</string>
+    <string name="connection_instructions">Connect this phone by USB and let the authorized AudioShare Host start the receiver automatically. No Wi-Fi or Internet permission is used.</string>
+</resources>
