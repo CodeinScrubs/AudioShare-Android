@@ -41,7 +41,7 @@ output, cable reconnect, latency, and long-run acceptance.
 ## Build
 
 The project uses Android Gradle Plugin 9.3.2 and its built-in Kotlin support with
-a checksum-pinned Gradle 9.5.1 wrapper. JDK 17 or newer is supported; CI uses
+a checksum-pinned Gradle 9.7.1 wrapper. JDK 17 or newer is supported; CI uses
 the AGP baseline of JDK 17:
 
 ```powershell
