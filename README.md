@@ -32,9 +32,10 @@ output, cable reconnect, latency, and long-run acceptance.
 - A partial wake lock is held only while a USB session is waiting or streaming,
   then released, so playback can continue reliably with the screen off.
 - Each session uses a 256-bit nonce and a unique abstract socket name.
-- Every protocol field and payload length is bounded; the transient playback
-  queue is capped at 32 chunks (256 KiB maximum) with live-edge oldest-drop
-  behavior if Android remains unable to play.
+- Every protocol field and payload length is bounded. The transient playback
+  queue keeps only the newest 80 ms of complete PCM chunks (or one indivisible
+  chunk), with a separate 32-chunk hard memory bound, so a route or writer stall
+  drops stale audio instead of becoming permanent playback lag.
 - A launched service stops if the host does not connect or authenticate.
 
 ## Build

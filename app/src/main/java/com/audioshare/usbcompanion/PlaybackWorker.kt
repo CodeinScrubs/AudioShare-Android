@@ -7,7 +7,6 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Process
-import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -20,13 +19,11 @@ class PlaybackWorker(
     private val format: WireProtocol.Hello,
 ) : AutoCloseable {
     private val running = AtomicBoolean(true)
-    // The socket reader and AudioTrack writer are deliberately decoupled.
-    // Some devices briefly pause the writer while a cold process establishes
-    // its speaker route or the display turns off. Thirty-two protocol-bounded
-    // chunks consume at most 256 KiB and absorb that transient without adding
-    // steady-state latency; the oldest complete chunk is still dropped if the
-    // receiver remains unable to play beyond this hard bound.
-    private val queue = ArrayBlockingQueue<ByteArray>(32)
+    // The socket reader and AudioTrack writer are deliberately decoupled, but
+    // stalled audio is never allowed to become permanent lag. The duration-
+    // based queue retains at most an 80 ms live edge (or one indivisible input
+    // chunk) and accounts every older complete frame it drops.
+    private val queue = LiveEdgePcmQueue(bytesPerFrame(), format.sampleRate)
     private val ready = CountDownLatch(1)
     private val startupError = AtomicReference<Throwable?>()
     private val runtimeError = AtomicReference<Throwable?>()
@@ -55,20 +52,14 @@ class PlaybackWorker(
             throw IllegalArgumentException("PCM payload is not frame-aligned")
         }
         receivedFrames.addAndGet(payload.size.toLong() / bytesPerFrame())
-        if (!queue.offer(payload.copyOf())) {
-            val removed = queue.poll()
-            if (removed != null) droppedFrames.addAndGet(removed.size.toLong() / bytesPerFrame())
-            if (!queue.offer(payload.copyOf())) {
-                droppedFrames.addAndGet(payload.size.toLong() / bytesPerFrame())
-            }
-        }
+        droppedFrames.addAndGet(queue.offer(payload))
     }
 
     fun statsPayload(): ByteArray {
         val buffer = java.nio.ByteBuffer.allocate(24).order(java.nio.ByteOrder.BIG_ENDIAN)
         buffer.putLong(receivedFrames.get())
         buffer.putLong(droppedFrames.get())
-        buffer.putInt(queue.size)
+        buffer.putInt(queue.snapshot().chunks)
         buffer.putInt(configuredBufferFrames)
         return buffer.array()
     }
@@ -265,5 +256,6 @@ class PlaybackWorker(
         }
         thread.interrupt()
         thread.join(3_000)
+        queue.clear()
     }
 }
