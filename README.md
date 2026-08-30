@@ -60,12 +60,23 @@ python .\tools\device_protocol_smoke.py `
   --serial '<adb-serial>' --duration 3
 ```
 
+For a strict 60-second screen-off continuity run, use
+`--duration 60 --screen-off-seconds 60`. The harness records the initial display state, turns
+the display off and waits for that power transition before it launches the
+receiver, verifies that the display is still off with the session wake lock
+present, then restores the original display state during cleanup. Separating
+the transition from the measured stream keeps the zero-drop assertion about
+steady screen-off playback rather than about emulator power-transition timing.
+
 An Android 16 emulator passed cold install, speaker/playback-head readiness,
 READY, 2,880,000 exact PCM frames over 60 seconds with the display off, STATS,
 heartbeat, enforced built-in-speaker routing, zero drops, wake-lock visibility,
 STOP, screen restoration, and exact forward/service cleanup. A physical Samsung
 is still required to prove audible speaker output, the actual USB cable,
 device-specific foreground policy, reconnect, measured latency, and endurance.
+Locking an already-streaming cold emulator can briefly stall its virtual
+`AudioTrack`; the bounded live-edge queue intentionally counts and discards stale
+frames in that case instead of preserving permanent playback delay.
 
 Release APKs require an external stable signing key; see
 [`docs/SIGNING.md`](docs/SIGNING.md). This project is licensed under

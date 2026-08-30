@@ -134,6 +134,30 @@ def wait_for_service_stop(args: argparse.Namespace, timeout: float = 3.0) -> Non
     raise RuntimeError("companion playback service did not stop after STOP")
 
 
+def screen_is_awake(args: argparse.Namespace) -> bool:
+    return "mWakefulness=Awake" in adb(args, "shell", "dumpsys", "power")
+
+
+def wait_for_screen_state(
+    args: argparse.Namespace,
+    *,
+    awake: bool,
+    timeout: float = 3.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    matching_since: float | None = None
+    while time.monotonic() < deadline:
+        if screen_is_awake(args) == awake:
+            matching_since = matching_since or time.monotonic()
+            if time.monotonic() - matching_since >= 0.5:
+                return
+        else:
+            matching_since = None
+        time.sleep(0.1)
+    expected = "awake" if awake else "off"
+    raise RuntimeError(f"Android display did not become {expected}")
+
+
 def remove_and_verify_forward(args: argparse.Namespace, port: int) -> None:
     adb(args, "forward", "--remove", f"tcp:{port}")
     for line in adb(args, "forward", "--list").splitlines():
@@ -149,8 +173,20 @@ def run(args: argparse.Namespace) -> None:
     port: int | None = None
     stream: socket.socket | None = None
     screen_was_awake = False
+    screen_state_recorded = False
+    screen_off_verified = False
     sequence = 1
     try:
+        screen_was_awake = screen_is_awake(args)
+        screen_state_recorded = True
+        if args.screen_off_seconds > 0 and screen_was_awake:
+            adb(args, "shell", "input", "keyevent", "26")
+        if args.screen_off_seconds > 0:
+            wait_for_screen_state(args, awake=False)
+            screen_off_verified = not screen_is_awake(args)
+            if not screen_off_verified:
+                raise RuntimeError("Android display woke before the screen-off session started")
+
         port_text = adb(
             args,
             "forward",
@@ -186,11 +222,6 @@ def run(args: argparse.Namespace) -> None:
         sample_rate, channels, bits, buffer_frames = struct.unpack(">IIII", payload)
         if (sample_rate, channels, bits) != (48_000, 2, 16) or buffer_frames <= 0:
             raise RuntimeError("companion READY format does not match PCM contract")
-
-        power_state = adb(args, "shell", "dumpsys", "power")
-        screen_was_awake = "mWakefulness=Awake" in power_state
-        if args.screen_off_seconds > 0 and screen_was_awake:
-            adb(args, "shell", "input", "keyevent", "26")
 
         phase = 0
         total_frames = 0
@@ -231,6 +262,10 @@ def run(args: argparse.Namespace) -> None:
         wake_lock_seen = "AudioShare:UsbPlayback" in wake_dump
         if not wake_lock_seen:
             raise RuntimeError("session-scoped playback wake lock was not visible")
+        if args.screen_off_seconds > 0:
+            screen_off_verified = "mWakefulness=Awake" not in wake_dump
+            if not screen_off_verified:
+                raise RuntimeError("Android display woke during the screen-off session")
         send_frame(stream, STOP, sequence + 1)
         stream.close()
         stream = None
@@ -241,14 +276,16 @@ def run(args: argparse.Namespace) -> None:
             "DEVICE_PROTOCOL_SMOKE_OK "
             f"serial={args.serial} frames={received} dropped={dropped} "
             f"queue={queue_depth} buffer={buffer_frames} wake_lock={wake_lock_seen} "
-            "service_stopped=True forward_removed=True"
+            f"screen_off={screen_off_verified} service_stopped=True forward_removed=True"
         )
     finally:
         if stream is not None:
             stream.close()
-        if args.screen_off_seconds > 0 and screen_was_awake:
+        if args.screen_off_seconds > 0 and screen_state_recorded:
             try:
-                adb(args, "shell", "input", "keyevent", "26")
+                if screen_is_awake(args) != screen_was_awake:
+                    adb(args, "shell", "input", "keyevent", "26")
+                    wait_for_screen_state(args, awake=screen_was_awake)
             except Exception as error:  # best-effort state restoration
                 print(f"warning: could not restore screen state: {error}", file=sys.stderr)
         if port is not None:
