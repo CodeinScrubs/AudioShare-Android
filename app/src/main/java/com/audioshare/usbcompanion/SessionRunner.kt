@@ -3,10 +3,12 @@ package com.audioshare.usbcompanion
 import android.content.Context
 import android.net.LocalServerSocket
 import android.net.LocalSocket
+import android.os.PowerManager
 import java.io.Closeable
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -18,8 +20,8 @@ class SessionRunner(
     private val listener: Listener,
 ) : Closeable {
     interface Listener {
-        fun onState(generation: Long, state: String)
-        fun onStopped(generation: Long, error: String?)
+        fun onState(source: SessionRunner, state: String)
+        fun onStopped(source: SessionRunner, error: String?)
     }
 
     private val running = AtomicBoolean(true)
@@ -27,6 +29,9 @@ class SessionRunner(
         Thread(task, "AudioShare-Watchdog")
     }
     private val thread = Thread(::runSession, "AudioShare-Session")
+    private val wakeLock = context.getSystemService(PowerManager::class.java)
+        .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AudioShare:UsbPlayback")
+        .apply { setReferenceCounted(false) }
 
     @Volatile private var server: LocalServerSocket? = null
     @Volatile private var client: LocalSocket? = null
@@ -38,7 +43,8 @@ class SessionRunner(
         var connectTimeout: ScheduledFuture<*>? = null
         var errorMessage: String? = null
         try {
-            listener.onState(config.generation, "Waiting for PC")
+            wakeLock.acquire()
+            listener.onState(this, "Waiting for PC")
             val localServer = LocalServerSocket(config.socketName)
             server = localServer
             connectTimeout = scheduler.schedule({ closeTransport() }, 20, TimeUnit.SECONDS)
@@ -46,7 +52,7 @@ class SessionRunner(
             client = localClient
             connectTimeout.cancel(false)
             localClient.soTimeout = 10_000
-            listener.onState(config.generation, "Authenticating")
+            listener.onState(this, "Authenticating")
 
             val first = WireProtocol.readFrame(localClient.inputStream)
                 ?: throw ProtocolException("Host disconnected before HELLO")
@@ -59,7 +65,7 @@ class SessionRunner(
                 .putInt(playback.configuredBufferFrames)
                 .array()
             send(WireProtocol.Frame(WireProtocol.Type.READY, first.sequence, readyPayload))
-            listener.onState(config.generation, "Receiving audio")
+            listener.onState(this, "Receiving audio")
 
             var lastSequence = first.sequence
             while (running.get()) {
@@ -79,14 +85,28 @@ class SessionRunner(
                 }
             }
         } catch (error: Throwable) {
-            if (running.get()) errorMessage = safeMessage(error)
+            if (running.get()) {
+                errorMessage = safeMessage(error)
+                try {
+                    send(
+                        WireProtocol.Frame(
+                            WireProtocol.Type.ERROR,
+                            0,
+                            errorMessage.toByteArray(StandardCharsets.UTF_8),
+                        ),
+                    )
+                } catch (_: Throwable) {
+                    // The transport may be the reason the session failed.
+                }
+            }
         } finally {
             running.set(false)
             connectTimeout?.cancel(false)
             playback?.close()
             closeTransport()
             scheduler.shutdownNow()
-            listener.onStopped(config.generation, errorMessage)
+            if (wakeLock.isHeld) wakeLock.release()
+            listener.onStopped(this, errorMessage)
         }
     }
 

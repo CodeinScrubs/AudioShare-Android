@@ -20,10 +20,17 @@ class PlaybackWorker(
     private val format: WireProtocol.Hello,
 ) : AutoCloseable {
     private val running = AtomicBoolean(true)
-    private val queue = ArrayBlockingQueue<ByteArray>(8)
+    // The socket reader and AudioTrack writer are deliberately decoupled.
+    // Some devices briefly pause the writer while a cold process establishes
+    // its speaker route or the display turns off. Thirty-two protocol-bounded
+    // chunks consume at most 256 KiB and absorb that transient without adding
+    // steady-state latency; the oldest complete chunk is still dropped if the
+    // receiver remains unable to play beyond this hard bound.
+    private val queue = ArrayBlockingQueue<ByteArray>(32)
     private val ready = CountDownLatch(1)
     private val startupError = AtomicReference<Throwable?>()
     private val runtimeError = AtomicReference<Throwable?>()
+    private val activeTrack = AtomicReference<AudioTrack?>()
     private val droppedFrames = AtomicLong(0)
     private val receivedFrames = AtomicLong(0)
     private val thread = Thread(::runPlayback, "AudioShare-Playback")
@@ -103,10 +110,15 @@ class PlaybackWorker(
             if (track.state != AudioTrack.STATE_INITIALIZED) {
                 throw IllegalStateException("AudioTrack is not initialized")
             }
+            activeTrack.set(track)
             configuredBufferFrames = track.bufferSizeInFrames
-            preferBuiltInSpeaker(track)
+            val speakerId = requireBuiltInSpeaker(track)
             track.play()
+            awaitPlaybackReady(track, speakerId)
             ready.countDown()
+
+            val routeDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            var nextRouteCheck = 0L
 
             while (running.get()) {
                 val chunk = queue.poll(500, TimeUnit.MILLISECONDS) ?: continue
@@ -121,6 +133,11 @@ class PlaybackWorker(
                     } else {
                         offset += written
                         zeroWrites = 0
+                        val now = System.nanoTime()
+                        if (now >= nextRouteCheck) {
+                            verifyBuiltInSpeakerRoute(track, speakerId, routeDeadline, now)
+                            nextRouteCheck = now + TimeUnit.MILLISECONDS.toNanos(500)
+                        }
                     }
                 }
             }
@@ -129,6 +146,7 @@ class PlaybackWorker(
             runtimeError.compareAndSet(null, error)
             ready.countDown()
         } finally {
+            activeTrack.compareAndSet(track, null)
             try {
                 track?.pause()
                 track?.flush()
@@ -141,17 +159,110 @@ class PlaybackWorker(
         }
     }
 
-    private fun preferBuiltInSpeaker(track: AudioTrack) {
+    private fun requireBuiltInSpeaker(track: AudioTrack): Int {
         val audioManager = context.getSystemService(AudioManager::class.java)
         val speaker = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
             .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
-        if (speaker != null) track.preferredDevice = speaker
+            ?: throw IllegalStateException("This Android device has no built-in speaker output")
+        if (!track.setPreferredDevice(speaker)) {
+            throw IllegalStateException("Android rejected the built-in speaker route")
+        }
+        return speaker.id
+    }
+
+    private fun awaitPlaybackReady(track: AudioTrack, speakerId: Int) {
+        // READY means the receiver can actually consume audio, not merely that
+        // AudioTrack.play() returned. A cold Android process can otherwise
+        // stall its first writes during a screen-state transition and overflow
+        // the bounded live-edge queue. Pace silent 10 ms periods until the
+        // playback head advances and confirm the real speaker route before
+        // allowing Windows capture to begin.
+        val prime = ByteArray((format.sampleRate / 100) * bytesPerFrame())
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        var nextPrimeWrite = 0L
+        while (running.get()) {
+            val now = System.nanoTime()
+            if (now >= nextPrimeWrite) {
+                // setPreferredDevice may asynchronously recreate the native
+                // track on a cold process. Keep supplying silence at its real
+                // playback rate until the replacement advances; non-blocking
+                // writes keep the startup deadline enforceable.
+                val written = track.write(prime, 0, prime.size, AudioTrack.WRITE_NON_BLOCKING)
+                if (written < 0) {
+                    throw IllegalStateException("AudioTrack priming write failed: $written")
+                }
+                nextPrimeWrite = now + TimeUnit.MILLISECONDS.toNanos(10)
+            }
+            val routed = track.routedDevice
+            if (routed != null &&
+                (routed.id != speakerId || routed.type != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+            ) {
+                throw IllegalStateException(
+                    "Android routed PC audio to ${deviceTypeName(routed.type)} instead of the phone speaker",
+                )
+            }
+            if (routed?.id == speakerId &&
+                routed.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER &&
+                (track.playbackHeadPosition.toLong() and 0xFFFF_FFFFL) > 0L
+            ) {
+                return
+            }
+            if (now >= deadline) {
+                if (routed == null) {
+                    throw IllegalStateException("Android did not confirm the phone speaker route")
+                }
+                throw IllegalStateException("Android speaker playback did not begin")
+            }
+            Thread.sleep(5)
+        }
+        throw InterruptedException("Playback stopped during startup")
+    }
+
+    private fun verifyBuiltInSpeakerRoute(
+        track: AudioTrack,
+        speakerId: Int,
+        deadlineNanos: Long,
+        nowNanos: Long,
+    ) {
+        val routed = track.routedDevice
+        if (routed?.id == speakerId && routed.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) return
+        if (routed != null) {
+            throw IllegalStateException(
+                "Android routed PC audio to ${deviceTypeName(routed.type)} instead of the phone speaker",
+            )
+        }
+        if (nowNanos >= deadlineNanos) {
+            throw IllegalStateException("Android did not confirm the phone speaker route")
+        }
+    }
+
+    private fun deviceTypeName(type: Int): String = when (type) {
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+        -> "Bluetooth audio"
+        AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+        AudioDeviceInfo.TYPE_WIRED_HEADSET,
+        -> "wired audio"
+        AudioDeviceInfo.TYPE_USB_DEVICE,
+        AudioDeviceInfo.TYPE_USB_HEADSET,
+        AudioDeviceInfo.TYPE_USB_ACCESSORY,
+        -> "USB audio"
+        else -> "output type $type"
     }
 
     private fun bytesPerFrame(): Int = format.channels * (format.bitsPerSample / 8)
 
     override fun close() {
         if (!running.getAndSet(false)) return
+        try {
+            activeTrack.get()?.let { track ->
+                track.pause()
+                track.flush()
+                track.stop()
+            }
+        } catch (_: IllegalStateException) {
+            // Interrupt/join below still owns final release on the worker.
+        }
         thread.interrupt()
         thread.join(3_000)
     }

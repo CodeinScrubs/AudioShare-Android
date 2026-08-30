@@ -6,55 +6,69 @@ def releaseKeystorePath = providers.environmentVariable('AUDIOSHARE_KEYSTORE_PAT
 def releaseKeystorePassword = providers.environmentVariable('AUDIOSHARE_KEYSTORE_PASSWORD').orNull
 def releaseKeyAlias = providers.environmentVariable('AUDIOSHARE_KEY_ALIAS').orNull
 def releaseKeyPassword = providers.environmentVariable('AUDIOSHARE_KEY_PASSWORD').orNull
-def hasExternalSigning = [
-        releaseKeystorePath,
-        releaseKeystorePassword,
-        releaseKeyAlias,
-        releaseKeyPassword,
-].every { it != null && !it.isBlank() }
+def releaseSigningInputs = [
+        AUDIOSHARE_KEYSTORE_PATH: releaseKeystorePath,
+        AUDIOSHARE_KEYSTORE_PASSWORD: releaseKeystorePassword,
+        AUDIOSHARE_KEY_ALIAS: releaseKeyAlias,
+        AUDIOSHARE_KEY_PASSWORD: releaseKeyPassword,
+]
+def suppliedSigningInputs = releaseSigningInputs.findAll {
+    _, value -> value != null && !value.isBlank()
+}
+if (!suppliedSigningInputs.isEmpty() &&
+        suppliedSigningInputs.size() != releaseSigningInputs.size()) {
+    def missingNames = releaseSigningInputs.findAll {
+        _, value -> value == null || value.isBlank()
+    }.keySet().join(', ')
+    throw new GradleException("Incomplete release signing configuration; missing: $missingNames")
+}
+def hasExternalSigning = suppliedSigningInputs.size() == releaseSigningInputs.size()
+if (hasExternalSigning && !file(releaseKeystorePath).isFile()) {
+    throw new GradleException('AUDIOSHARE_KEYSTORE_PATH does not identify a readable file')
+}
 
 android {
-    namespace 'com.audioshare.usbcompanion'
-    compileSdk 36
+    namespace = 'com.audioshare.usbcompanion'
+    compileSdk = 36
 
     defaultConfig {
-        applicationId 'com.audioshare.usbcompanion'
-        minSdk 26
-        targetSdk 36
-        versionCode 1
-        versionName '0.1.0-poc'
+        applicationId = 'com.audioshare.usbcompanion'
+        minSdk = 26
+        targetSdk = 36
+        versionCode = 2
+        versionName = '0.2.0-poc'
 
-        testInstrumentationRunner 'android.app.Instrumentation'
+        testInstrumentationRunner = 'android.app.Instrumentation'
     }
 
     signingConfigs {
         if (hasExternalSigning) {
             create('releaseExternal') {
-                storeFile file(releaseKeystorePath)
-                storePassword releaseKeystorePassword
-                keyAlias releaseKeyAlias
-                keyPassword releaseKeyPassword
+                storeFile = file(releaseKeystorePath)
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
             }
         }
     }
 
     buildTypes {
         debug {
-            applicationIdSuffix '.debug'
-            versionNameSuffix '-debug'
+            applicationIdSuffix = '.debug'
+            versionNameSuffix = '-debug'
         }
         release {
-            minifyEnabled false
+            minifyEnabled = false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             if (hasExternalSigning) {
-                signingConfig signingConfigs.getByName('releaseExternal')
+                signingConfig = signingConfigs.getByName('releaseExternal')
             }
         }
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     testOptions {

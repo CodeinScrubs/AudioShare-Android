@@ -11,13 +11,19 @@ class BridgeActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (intent?.action == ACTION_LAUNCH) {
-            val serviceIntent = Intent(this, PlaybackService::class.java).apply {
-                action = PlaybackService.ACTION_START_SESSION
-                putExtras(intent.extras ?: Bundle.EMPTY)
-            }
-            startForegroundService(serviceIntent)
+        if (intent?.action != ACTION_LAUNCH) {
+            finishAndRemoveTask()
+            return
         }
+        startReceiverAndFinish()
+    }
+
+    private fun startReceiverAndFinish() {
+        val serviceIntent = Intent(this, PlaybackService::class.java).apply {
+            action = PlaybackService.ACTION_START_SESSION
+            putExtras(intent.extras ?: Bundle.EMPTY)
+        }
+        startForegroundService(serviceIntent)
         finishAndRemoveTask()
     }
 }

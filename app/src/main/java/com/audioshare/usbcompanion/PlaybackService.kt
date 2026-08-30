@@ -20,7 +20,6 @@ class PlaybackService : Service(), SessionRunner.Listener {
 
     private val lock = Any()
     private var runner: SessionRunner? = null
-    private var currentGeneration = -1L
     @Volatile private var state = "Preparing"
 
     override fun onCreate() {
@@ -46,20 +45,20 @@ class PlaybackService : Service(), SessionRunner.Listener {
     }
 
     private fun startSession(config: SessionConfig) {
+        val replacement = SessionRunner(applicationContext, config, this)
         val previous = synchronized(lock) {
             val old = runner
-            runner = null
-            currentGeneration = config.generation
+            runner = replacement
             old
         }
+        // Publish the replacement before stopping the old runner. Its final
+        // callback is then rejected by object identity even when a restarted
+        // host reuses the same small generation number.
         previous?.close()
-        val replacement = SessionRunner(applicationContext, config, this)
-        synchronized(lock) {
-            if (currentGeneration != config.generation) {
-                replacement.close()
-                return
-            }
-            runner = replacement
+        val stillCurrent = synchronized(lock) { runner === replacement }
+        if (!stillCurrent) {
+            replacement.close()
+            return
         }
         replacement.start()
     }
@@ -68,7 +67,6 @@ class PlaybackService : Service(), SessionRunner.Listener {
         val previous = synchronized(lock) {
             val old = runner
             runner = null
-            currentGeneration = -1L
             old
         }
         previous?.close()
@@ -76,19 +74,18 @@ class PlaybackService : Service(), SessionRunner.Listener {
         stopSelf()
     }
 
-    override fun onState(generation: Long, state: String) {
+    override fun onState(source: SessionRunner, state: String) {
         synchronized(lock) {
-            if (generation != currentGeneration) return
+            if (runner !== source) return
         }
         this.state = state
         startInForeground(state)
     }
 
-    override fun onStopped(generation: Long, error: String?) {
+    override fun onStopped(source: SessionRunner, error: String?) {
         synchronized(lock) {
-            if (generation != currentGeneration) return
+            if (runner !== source) return
             runner = null
-            currentGeneration = -1L
         }
         stopWithError(error)
     }
@@ -103,7 +100,6 @@ class PlaybackService : Service(), SessionRunner.Listener {
         val previous = synchronized(lock) {
             val old = runner
             runner = null
-            currentGeneration = -1L
             old
         }
         previous?.close()
