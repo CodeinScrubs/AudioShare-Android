@@ -56,6 +56,14 @@ class PlaybackWorker(
     }
 
     fun statsPayload(): ByteArray {
+        // The playback thread can fail independently of the socket reader
+        // (for example when Android revokes the speaker route). Surface that
+        // failure on the next heartbeat even when no PCM frame is arriving;
+        // otherwise the host could keep reporting a healthy session with no
+        // audible output.
+        runtimeError.get()?.let {
+            throw IllegalStateException("AudioTrack playback failed", it)
+        }
         val buffer = java.nio.ByteBuffer.allocate(24).order(java.nio.ByteOrder.BIG_ENDIAN)
         buffer.putLong(receivedFrames.get())
         buffer.putLong(droppedFrames.get())
