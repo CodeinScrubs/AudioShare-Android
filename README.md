@@ -8,7 +8,7 @@ forward from a randomized Windows loopback port to a randomized Android
 abstract Unix-domain socket, and streams framed PCM to a foreground media
 playback service.
 
-Current phase: version-code 4 public release candidate. The complete Windows to
+Current phase: version-code 5 public release candidate. The complete Windows to
 USB to built-in-speaker path is hardware tested on a Samsung Galaxy A52s running
 Android 14 with global-system capture, a 10 ms host queue high-water mark, and
 zero visible host/Android drops in the initial audible run. Screen-off endurance,
@@ -31,12 +31,21 @@ manual gates before the release candidate is promoted to stable. See
   Android's foreground-service Task Manager.
 - Playback verifies the actual Android audio route after writing starts and
   fails visibly if the OS routes PC audio anywhere except the built-in speaker.
+  A later temporary loss of route information gets a fresh two-second grace
+  window instead of reusing the startup deadline, so normal Android audio
+  policy transitions do not terminate a long-running session prematurely.
+- A playback watchdog observes write progress and the Android playback head;
+  if PC audio remains pending while both stop advancing for two seconds, the
+  session is terminated with an explicit playback-stalled error instead of
+  reporting a healthy but silent connection.
 - Playback requests media audio focus. Transient focus loss flushes queued PCM
   and resumes only at the live edge; ducking lowers the track volume; permanent
   loss is reported to Windows as a playback error.
-- Disconnect actively stops any in-flight `AudioTrack` write before joining the
-  playback worker, so teardown cannot retain the session wake lock behind a
-  stalled route.
+- Disconnect interrupts any in-flight `AudioTrack` write and waits only for
+  bounded worker termination, so teardown cannot retain the session wake lock
+  behind a stalled route.
+- The receiver prefers Android's low-latency `AudioTrack` mode and retries with
+  the compatibility performance mode if an OEM rejects low-latency creation.
 - A partial wake lock is held only while a USB session is waiting or streaming,
   then released, so playback can continue reliably with the screen off.
 - Each session uses a 256-bit nonce and a unique abstract socket name.
@@ -45,6 +54,11 @@ manual gates before the release candidate is promoted to stable. See
   chunk), with a separate 32-chunk hard memory bound, so a route or writer stall
   drops stale audio instead of becoming permanent playback lag.
 - A launched service stops if the host does not connect or authenticate.
+  Its connection watchdog closes only the listening socket and cannot race a
+  client that was accepted at the deadline.
+- If Android rejects the foreground playback service, the launch bridge keeps
+  the ADB activity result explicitly failed with the reason so Windows reports
+  the service-start problem instead of waiting for a generic handshake timeout.
 
 ## Build
 

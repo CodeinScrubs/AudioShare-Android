@@ -28,13 +28,20 @@ class PlaybackWorker(
     // chunk) and accounts every older complete frame it drops.
     private val queue = LiveEdgePcmQueue(bytesPerFrame(), format.sampleRate)
     private val ready = CountDownLatch(1)
+    private val terminated = CountDownLatch(1)
     private val startupError = AtomicReference<Throwable?>()
     private val runtimeError = AtomicReference<Throwable?>()
     private val activeTrack = AtomicReference<AudioTrack?>()
     private val droppedFrames = AtomicLong(0)
     private val receivedFrames = AtomicLong(0)
+    private val writtenFrames = AtomicLong(0)
+    private val playbackHeadFrames = AtomicLong(0)
+    private val lastWriteProgressNanos = AtomicLong(0)
+    private val lastPlaybackAdvanceNanos = AtomicLong(0)
     private val focusState = AtomicInteger(FOCUS_NONE)
     private val thread = Thread(::runPlayback, "AudioShare-Playback")
+    private var watchdogThread: Thread? = null
+    private val stallDetector = PlaybackStallDetector(PLAYBACK_STALL_TIMEOUT_NANOS)
     private val audioManager = context.getSystemService(AudioManager::class.java)
     private val audioAttributes = AudioAttributes.Builder()
         .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -62,9 +69,19 @@ class PlaybackWorker(
 
     init {
         thread.start()
-        if (!ready.await(5, TimeUnit.SECONDS)) {
+        try {
+            if (!ready.await(5, TimeUnit.SECONDS)) {
+                close()
+                throw IllegalStateException("AudioTrack initialization timed out")
+            }
+        } catch (error: InterruptedException) {
+            // Construction can be interrupted by SessionRunner.close() before
+            // the new worker is assigned to the runner's local `playback`
+            // variable. Own cleanup here so that thread, track, and audio focus
+            // cannot escape the interrupted constructor.
             close()
-            throw IllegalStateException("AudioTrack initialization timed out")
+            Thread.currentThread().interrupt()
+            throw error
         }
         startupError.get()?.let { throw IllegalStateException("AudioTrack initialization failed", it) }
     }
@@ -145,22 +162,7 @@ class PlaybackWorker(
                 bytesPerFrame = bytesPerFrame(),
                 minimumBytes = minimumBytes,
             )
-            track = AudioTrack.Builder()
-                .setAudioAttributes(audioAttributes)
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(format.sampleRate)
-                        .setChannelMask(channelMask)
-                        .build(),
-                )
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .setBufferSizeInBytes(bufferPlan.capacityBytes)
-                .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-                .build()
-            if (track.state != AudioTrack.STATE_INITIALIZED) {
-                throw IllegalStateException("AudioTrack is not initialized")
-            }
+            track = buildAudioTrack(channelMask, bufferPlan.capacityBytes)
             activeTrack.set(track)
             bufferCapacityFrames = track.bufferCapacityInFrames
             val effectiveBufferFrames = track.setBufferSizeInFrames(
@@ -190,11 +192,22 @@ class PlaybackWorker(
             track.play()
             awaitPlaybackReady(track, speakerId)
             ready.countDown()
+            startPlaybackWatchdog(track)
 
-            val routeDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
             var nextRouteCheck = 0L
+            var routeMissingSinceNanos: Long? = null
 
             while (running.get()) {
+                val now = System.nanoTime()
+                if (now >= nextRouteCheck) {
+                    routeMissingSinceNanos = verifyBuiltInSpeakerRoute(
+                        track,
+                        speakerId,
+                        routeMissingSinceNanos,
+                        now,
+                    )
+                    nextRouteCheck = now + TimeUnit.MILLISECONDS.toNanos(500)
+                }
                 val chunk = queue.poll(500, TimeUnit.MILLISECONDS) ?: continue
                 var offset = 0
                 var zeroWrites = 0
@@ -212,12 +225,9 @@ class PlaybackWorker(
                         if (zeroWrites >= 5) throw IllegalStateException("AudioTrack made no write progress")
                     } else {
                         offset += written
+                        writtenFrames.addAndGet(written.toLong() / bytesPerFrame())
+                        lastWriteProgressNanos.set(System.nanoTime())
                         zeroWrites = 0
-                        val now = System.nanoTime()
-                        if (now >= nextRouteCheck) {
-                            verifyBuiltInSpeakerRoute(track, speakerId, routeDeadline, now)
-                            nextRouteCheck = now + TimeUnit.MILLISECONDS.toNanos(500)
-                        }
                     }
                 }
             }
@@ -226,18 +236,77 @@ class PlaybackWorker(
             runtimeError.compareAndSet(null, error)
             ready.countDown()
         } finally {
-            focusAvailable.set(false)
-            audioManager.abandonAudioFocusRequest(focusRequest)
-            activeTrack.compareAndSet(track, null)
+            running.set(false)
             try {
-                track?.pause()
-                track?.flush()
-                track?.stop()
-            } catch (_: IllegalStateException) {
-                // Release remains mandatory even if the track changed state.
+                focusAvailable.set(false)
+                try {
+                    audioManager.abandonAudioFocusRequest(focusRequest)
+                } catch (_: RuntimeException) {
+                    // Cleanup must continue on vendor AudioManager failures.
+                }
+                try {
+                    track?.pause()
+                    track?.flush()
+                    track?.stop()
+                } catch (_: RuntimeException) {
+                    // Release remains mandatory even if the track changed
+                    // state or a vendor implementation rejects teardown.
+                }
+                try {
+                    track?.release()
+                } catch (_: RuntimeException) {
+                    // Do not crash the service while reporting playback
+                    // failure. A close-side rescue may already have released
+                    // the same track to unblock a stalled write.
+                }
+            } finally {
+                activeTrack.compareAndSet(track, null)
+                ready.countDown()
+                terminated.countDown()
             }
-            track?.release()
-            ready.countDown()
+        }
+    }
+
+    private fun buildAudioTrack(channelMask: Int, capacityBytes: Int): AudioTrack {
+        fun create(performanceMode: Int): AudioTrack = AudioTrack.Builder()
+            .setAudioAttributes(audioAttributes)
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(format.sampleRate)
+                    .setChannelMask(channelMask)
+                    .build(),
+            )
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .setBufferSizeInBytes(capacityBytes)
+            .setPerformanceMode(performanceMode)
+            .build()
+
+        var lowLatencyTrack: AudioTrack? = null
+        try {
+            lowLatencyTrack = create(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+            if (lowLatencyTrack.state != AudioTrack.STATE_INITIALIZED) {
+                throw IllegalStateException("Low-latency AudioTrack is not initialized")
+            }
+            return lowLatencyTrack
+        } catch (error: RuntimeException) {
+            try {
+                lowLatencyTrack?.release()
+            } catch (_: RuntimeException) {
+                // The compatibility attempt below is still useful when an
+                // OEM rejects release of an uninitialized low-latency track.
+            }
+            try {
+                val compatibilityTrack = create(AudioTrack.PERFORMANCE_MODE_NONE)
+                if (compatibilityTrack.state != AudioTrack.STATE_INITIALIZED) {
+                    compatibilityTrack.release()
+                    throw IllegalStateException("Compatibility AudioTrack is not initialized")
+                }
+                return compatibilityTrack
+            } catch (fallbackError: RuntimeException) {
+                fallbackError.addSuppressed(error)
+                throw fallbackError
+            }
         }
     }
 
@@ -363,21 +432,92 @@ class PlaybackWorker(
     private fun verifyBuiltInSpeakerRoute(
         track: AudioTrack,
         speakerId: Int,
-        deadlineNanos: Long,
+        missingSinceNanos: Long?,
         nowNanos: Long,
-    ) {
+    ): Long? {
         val routed = track.routedDevice
         routedDeviceType = routed?.type ?: 0
-        if (routed?.id == speakerId && routed.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) return
+        val observation = routeGraceTracker.observe(
+            nowNanos = nowNanos,
+            routedToSpeaker = routed?.id == speakerId &&
+                routed.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER,
+            routedToOtherDevice = routed != null &&
+                (routed.id != speakerId || routed.type != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER),
+        )
+        if (observation == RouteGraceTracker.Observation.VALID) return null
         if (routed != null) {
             throw IllegalStateException(
                 "Android routed PC audio to ${deviceTypeName(routed.type)} instead of the phone speaker",
             )
         }
-        if (nowNanos >= deadlineNanos) {
+        val firstMissing = missingSinceNanos ?: nowNanos
+        if (observation == RouteGraceTracker.Observation.EXPIRED ||
+            nowNanos - firstMissing >= ROUTE_GRACE_NANOS
+        ) {
             throw IllegalStateException("Android did not confirm the phone speaker route")
         }
+        return firstMissing
     }
+
+    private fun startPlaybackWatchdog(track: AudioTrack) {
+        val now = System.nanoTime()
+        lastWriteProgressNanos.set(now)
+        lastPlaybackAdvanceNanos.set(now)
+        watchdogThread = Thread({ runPlaybackWatchdog(track) }, "AudioShare-PlaybackWatchdog")
+            .apply {
+                isDaemon = true
+                start()
+            }
+    }
+
+    private fun runPlaybackWatchdog(track: AudioTrack) {
+        var previousHead: Long? = null
+        while (running.get()) {
+            val now = System.nanoTime()
+            val head = try {
+                track.playbackHeadPosition.toLong() and 0xFFFF_FFFFL
+            } catch (_: RuntimeException) {
+                0L
+            }
+            playbackHeadFrames.set(head)
+            if (previousHead == null || previousHead != head) {
+                lastPlaybackAdvanceNanos.set(now)
+                previousHead = head
+            }
+            val queuedFrames = queue.snapshot().frames
+            if (stallDetector.isStalled(
+                    nowNanos = now,
+                    focusAvailable = focusAvailable.get(),
+                    receivedFrames = receivedFrames.get(),
+                    writtenFrames = writtenFrames.get(),
+                    queuedFrames = queuedFrames,
+                    lastWriteProgressNanos = lastWriteProgressNanos.get(),
+                    lastPlaybackAdvanceNanos = lastPlaybackAdvanceNanos.get(),
+                )
+            ) {
+                val error = IllegalStateException(
+                    "Android speaker playback stopped consuming PC audio",
+                )
+                runtimeError.compareAndSet(null, error)
+                running.set(false)
+                try {
+                    track.release()
+                } catch (_: RuntimeException) {
+                    // The playback thread still performs bounded cleanup.
+                }
+                thread.interrupt()
+                return
+            }
+            try {
+                Thread.sleep(250)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
+        }
+    }
+
+    private val routeGraceTracker = RouteGraceTracker(ROUTE_GRACE_NANOS)
 
     private fun deviceTypeName(type: Int): String = when (type) {
         AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
@@ -396,18 +536,51 @@ class PlaybackWorker(
     private fun bytesPerFrame(): Int = format.channels * (format.bitsPerSample / 8)
 
     override fun close() {
-        if (!running.getAndSet(false)) return
-        try {
-            activeTrack.get()?.let { track ->
-                track.pause()
-                track.flush()
-                track.stop()
-            }
-        } catch (_: IllegalStateException) {
-            // Interrupt/join below still owns final release on the worker.
-        }
+        running.set(false)
+        watchdogThread?.interrupt()
         thread.interrupt()
-        thread.join(3_000)
+        try {
+            if (!terminated.await(3, TimeUnit.SECONDS)) {
+                // A vendor AudioTrack can occasionally ignore interruption
+                // while a blocking write is in progress. Never call vendor
+                // teardown synchronously from the service/session thread: a
+                // broken OEM implementation must not hold the session wake
+                // lock forever. A daemon rescue attempts the documented
+                // release escape hatch while this caller waits only two more
+                // seconds.
+                Thread(
+                    {
+                        try {
+                            activeTrack.get()?.release()
+                        } catch (_: RuntimeException) {
+                            // The bounded caller reports failure below if the
+                            // playback thread still does not terminate.
+                        }
+                    },
+                    "AudioShare-PlaybackRescue",
+                ).apply {
+                    isDaemon = true
+                    start()
+                }
+                if (!terminated.await(2, TimeUnit.SECONDS)) {
+                    runtimeError.compareAndSet(
+                        null,
+                        IllegalStateException("AudioTrack worker did not stop within 5 seconds"),
+                    )
+                }
+            }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            runtimeError.compareAndSet(
+                null,
+                IllegalStateException("AudioTrack worker shutdown was interrupted"),
+            )
+        }
+        try {
+            watchdogThread?.join(1_000)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
         droppedFrames.addAndGet(queue.discardAll())
     }
 
@@ -420,5 +593,7 @@ class PlaybackWorker(
         const val FOCUS_TRANSIENT_LOSS = 3
         const val FOCUS_PERMANENT_LOSS = 4
         private const val DUCK_VOLUME = 0.2f
+        private val ROUTE_GRACE_NANOS = TimeUnit.SECONDS.toNanos(2)
+        private val PLAYBACK_STALL_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(2)
     }
 }

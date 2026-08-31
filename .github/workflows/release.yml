@@ -78,10 +78,18 @@ jobs:
           set -euo pipefail
           apk="app/build/outputs/apk/release/app-release.apk"
           apksigner="$ANDROID_HOME/build-tools/36.1.0/apksigner"
+          apkanalyzer="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
+          expected_version_code="$(sed -n "s/^[[:space:]]*versionCode = \([0-9][0-9]*\).*/\1/p" app/build.gradle)"
+          actual_version_code="$("$apkanalyzer" manifest version-code "$apk")"
+          test -n "$expected_version_code"
+          test "$actual_version_code" = "$expected_version_code"
           "$apksigner" verify --verbose --print-certs "$apk"
           cert_sha="$("$apksigner" verify --print-certs "$apk" | \
             sed -n 's/^Signer #1 certificate SHA-256 digest: //p')"
-          test "${#cert_sha}" -eq 64
+          expected_cert_sha="$(tr -d '[:space:]' < release-certificate-sha256.txt)"
+          [[ "$cert_sha" =~ ^[0-9a-fA-F]{64}$ ]]
+          [[ "$expected_cert_sha" =~ ^[0-9a-fA-F]{64}$ ]]
+          test "${cert_sha,,}" = "${expected_cert_sha,,}"
           mkdir -p dist
           asset="dist/AudioShare-USB-Companion-$GITHUB_REF_NAME.apk"
           cp "$apk" "$asset"

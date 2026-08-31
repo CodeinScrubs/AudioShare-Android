@@ -7,7 +7,7 @@ import java.util.concurrent.TimeUnit
 
 class LiveEdgePcmQueueTest {
     @Test
-    fun retainsOnlyNewestEightyMillisecondsAfterWriterStall() {
+    fun retainsOnlyNewestFortyMillisecondsAfterWriterStall() {
         val framesPerChunk = 480 // 10 ms at 48 kHz
         val queue = LiveEdgePcmQueue(bytesPerFrame = 4, sampleRate = 48_000)
         var discardedFrames = 0L

@@ -34,7 +34,19 @@ class BridgeActivity : Activity() {
                 intent.getLongExtra(SessionConfig.EXTRA_GENERATION, -1L),
             )
         }
-        startForegroundService(serviceIntent)
-        finishAndRemoveTask()
+        try {
+            startForegroundService(serviceIntent)
+            finishAndRemoveTask()
+        } catch (error: RuntimeException) {
+            // Keep the ADB `am start -W` result explicitly failed and include a
+            // useful reason instead of letting the host wait for a handshake
+            // timeout when Android rejects foreground-service startup.
+            finishAndRemoveTask()
+            throw IllegalStateException(
+                "Android refused to start the playback service: " +
+                    (error.message ?: error.javaClass.simpleName),
+                error,
+            )
+        }
     }
 }

@@ -45,7 +45,7 @@ Get-FileHash .\app\build\outputs\apk\release\app-release.apk -Algorithm SHA256
 Before supplying the result to the Windows release build, run the host
 repository's `tools/verify_companion_apk.ps1`. Packaging requires a valid APK
 signature, the explicitly supplied signer-certificate SHA-256, application ID
-`com.audioshare.usbcompanion`, version code 3 or newer, `debuggable=false`, and
+`com.audioshare.usbcompanion`, exactly version code 5, `debuggable=false`, and
 the exact foreground-playback permission allowlist; a wrong-key, debug,
 over-privileged, or unsigned package is rejected. Set the Windows build's
 `AUDIOSHARE_COMPANION_CERT_SHA256` to the 64-hex certificate digest printed by
@@ -68,13 +68,14 @@ following GitHub Actions secrets:
 - `AUDIOSHARE_KEY_ALIAS`
 - `AUDIOSHARE_KEY_PASSWORD`
 
-The public certificate SHA-256 for the first release identity is:
+The public certificate SHA-256 for the first release identity is pinned in
+`release-certificate-sha256.txt` and currently is:
 
 ```text
 23bb6499dbb6aa3610d0a9ee0df9c922d9023e4b7990dc23ac6c1743f215950c
 ```
 
-The owner's local keystore and Windows-user-encrypted credential backup live
-outside Git under `C:\Users\Shayan\.android\audioshare-usb-release`. Back up
-the signing identity separately before relying on it for long-term releases;
-the encrypted credential file is tied to the current Windows user profile.
+Keep the owner's local keystore and any credential backup outside Git in a
+private, access-controlled location. Back up the signing identity separately
+before relying on it for long-term releases; an operating-system-encrypted
+credential file may be tied to one user profile or machine.

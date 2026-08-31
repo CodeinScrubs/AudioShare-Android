@@ -47,9 +47,17 @@ class SessionRunner(
             listener.onState(this, "Waiting for PC")
             val localServer = LocalServerSocket(config.socketName)
             server = localServer
-            connectTimeout = scheduler.schedule({ closeTransport() }, 20, TimeUnit.SECONDS)
+            // The watchdog closes only the listening socket. Closing the whole
+            // transport here races with accept(): a client accepted at the
+            // deadline is already valid and must be allowed to authenticate.
+            connectTimeout = scheduler.schedule(
+                { transportLifecycle.closeAcceptWait() },
+                20,
+                TimeUnit.SECONDS,
+            )
             val localClient = localServer.accept()
             client = localClient
+            if (!transportLifecycle.continueAfterAccept(running.get())) return
             connectTimeout.cancel(false)
             localClient.soTimeout = 10_000
             listener.onState(this, "Authenticating")
@@ -117,15 +125,23 @@ class SessionRunner(
     }
 
     private fun closeTransport() {
-        try {
-            client?.close()
-        } catch (_: IOException) {
-        }
-        try {
-            server?.close()
-        } catch (_: IOException) {
-        }
+        transportLifecycle.closeAll()
     }
+
+    private val transportLifecycle = SessionTransportLifecycle(
+        closeClient = {
+            try {
+                client?.close()
+            } catch (_: IOException) {
+            }
+        },
+        closeServer = {
+            try {
+                server?.close()
+            } catch (_: IOException) {
+            }
+        },
+    )
 
     private fun safeMessage(error: Throwable): String =
         when (error) {
