@@ -8,7 +8,7 @@ forward from a randomized Windows loopback port to a randomized Android
 abstract Unix-domain socket, and streams framed PCM to a foreground media
 playback service.
 
-Current phase: version-code 2 release candidate pending physical-phone audible
+Current phase: version-code 3 release candidate pending physical-phone audible
 output, cable reconnect, latency, and long-run acceptance.
 
 ## Security and privacy contract
@@ -26,6 +26,9 @@ output, cable reconnect, latency, and long-run acceptance.
   Android's foreground-service Task Manager.
 - Playback verifies the actual Android audio route after writing starts and
   fails visibly if the OS routes PC audio anywhere except the built-in speaker.
+- Playback requests media audio focus. Transient focus loss flushes queued PCM
+  and resumes only at the live edge; ducking lowers the track volume; permanent
+  loss is reported to Windows as a playback error.
 - Disconnect actively stops any in-flight `AudioTrack` write before joining the
   playback worker, so teardown cannot retain the session wake lock behind a
   stalled route.
@@ -33,7 +36,7 @@ output, cable reconnect, latency, and long-run acceptance.
   then released, so playback can continue reliably with the screen off.
 - Each session uses a 256-bit nonce and a unique abstract socket name.
 - Every protocol field and payload length is bounded. The transient playback
-  queue keeps only the newest 80 ms of complete PCM chunks (or one indivisible
+  queue keeps only the newest 40 ms of complete PCM chunks (or one indivisible
   chunk), with a separate 32-chunk hard memory bound, so a route or writer stall
   drops stale audio instead of becoming permanent playback lag.
 - A launched service stops if the host does not connect or authenticate.
@@ -47,9 +50,16 @@ the AGP baseline of JDK 17:
 ```powershell
 $env:JAVA_HOME = 'C:\Program Files\Android\Android Studio\jbr'
 $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
-.\gradlew.bat clean testDebugUnitTest lintRelease assembleDebug assembleRelease `
+.\gradlew.bat clean testDebugUnitTest lintDebug assembleDebug `
   --no-daemon --max-workers=1
 ```
+
+`assembleRelease` and `lintRelease` require the external signing variables in
+[`docs/SIGNING.md`](docs/SIGNING.md); an unsigned artifact is never produced by
+the release task. The receiver uses a 40 ms target buffer without going below
+Android's reported minimum and, on API 31+, a 20 ms playback start threshold.
+The exact capacity, effective buffer, threshold, underruns, route, focus, media
+volume, and queue high-water mark are returned in STATS diagnostics.
 
 The real app and ADB-forwarded protocol can be exercised on an authorized device
 or emulator (the command sends a deliberately quiet test tone):
@@ -68,12 +78,14 @@ present, then restores the original display state during cleanup. Separating
 the transition from the measured stream keeps the zero-drop assertion about
 steady screen-off playback rather than about emulator power-transition timing.
 
-An Android 16 emulator passed cold install, speaker/playback-head readiness,
-READY, 2,880,000 exact PCM frames over 60 seconds with the display off, STATS,
-heartbeat, enforced built-in-speaker routing, zero drops, wake-lock visibility,
-STOP, screen restoration, and exact forward/service cleanup. A physical Samsung
-is still required to prove audible speaker output, the actual USB cable,
-device-specific foreground policy, reconnect, measured latency, and endurance.
+An Android 16 emulator can complete cold install, speaker/playback-head
+readiness, READY, STATS, heartbeat, enforced built-in-speaker routing,
+wake-lock visibility, STOP, and exact forward/service cleanup. Headless virtual
+audio is not a zero-drop timing oracle: a fresh 10-second run completed the
+protocol with route/focus state valid but reported virtual-audio underruns and
+dropped frames. A physical Samsung is still required to prove audible speaker
+output, the actual USB cable, device-specific foreground policy, reconnect,
+measured latency, zero-drop behavior, and endurance.
 Locking an already-streaming cold emulator can briefly stall its virtual
 `AudioTrack`; the bounded live-edge queue intentionally counts and discards stale
 frames in that case instead of preserving permanent playback delay.

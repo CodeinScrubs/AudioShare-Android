@@ -5,6 +5,8 @@ import java.io.DataOutputStream
 import java.io.EOFException
 import java.io.InputStream
 import java.io.OutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.security.MessageDigest
 
 object WireProtocol {
@@ -13,6 +15,8 @@ object WireProtocol {
     const val MAX_CONTROL_PAYLOAD = 64 * 1024
     const val MAX_PCM_PAYLOAD = 8 * 1024
     const val HELLO_PAYLOAD_SIZE = 40
+    const val LEGACY_STATS_PAYLOAD_SIZE = 24
+    const val ENHANCED_STATS_PAYLOAD_SIZE = 60
 
     enum class Type(val id: Int) {
         HELLO(1),
@@ -39,6 +43,46 @@ object WireProtocol {
         val channels: Int,
         val bitsPerSample: Int,
     )
+
+    data class PlaybackStats(
+        val receivedFrames: Long,
+        val droppedFrames: Long,
+        val queueDepth: Int,
+        val bufferFrames: Int,
+        val queueFrames: Int,
+        val bufferCapacityFrames: Int,
+        val startThresholdFrames: Int,
+        val underrunCount: Int,
+        val routedDeviceType: Int,
+        val focusState: Int,
+        val mediaVolume: Int,
+        val mediaVolumeMax: Int,
+        val queueHighWaterFrames: Int,
+    )
+
+    fun encodePlaybackStats(stats: PlaybackStats): ByteArray =
+        ByteBuffer.allocate(ENHANCED_STATS_PAYLOAD_SIZE)
+            .order(ByteOrder.BIG_ENDIAN)
+            .putLong(stats.receivedFrames)
+            .putLong(stats.droppedFrames)
+            .putInt(stats.queueDepth)
+            .putInt(stats.bufferFrames)
+            .putInt(stats.queueFrames)
+            .putInt(stats.bufferCapacityFrames)
+            .putInt(stats.startThresholdFrames)
+            .putInt(stats.underrunCount)
+            .putInt(stats.routedDeviceType)
+            .putInt(stats.focusState)
+            .putInt(stats.mediaVolume)
+            .putInt(stats.mediaVolumeMax)
+            .putInt(stats.queueHighWaterFrames)
+            .array()
+
+    fun requireStrictlyIncreasingSequence(previous: Int, next: Int) {
+        if (next <= previous) {
+            throw ProtocolException("Sequence did not increase")
+        }
+    }
 
     fun readFrame(input: InputStream): Frame? {
         val stream = DataInputStream(input)

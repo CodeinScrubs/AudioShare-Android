@@ -27,8 +27,8 @@ $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 ```
 
 When all variables are present, Gradle uses that external identity. When they
-are absent, `assembleRelease` intentionally produces an unsigned POC artifact;
-it must not be presented as the distributable APK.
+are absent, release lint/assembly fails closed. Use `assembleDebug` for local
+POC work; the release task never emits an unsigned artifact.
 
 After signing, record the certificate and artifact fingerprints without exposing
 the private key:
@@ -45,8 +45,9 @@ Get-FileHash .\app\build\outputs\apk\release\app-release.apk -Algorithm SHA256
 Before supplying the result to the Windows release build, run the host
 repository's `tools/verify_companion_apk.ps1`. Packaging requires a valid APK
 signature, the explicitly supplied signer-certificate SHA-256, application ID
-`com.audioshare.usbcompanion`, and version code 2 or newer; a wrong-key, debug,
-or unsigned package is rejected. Set the Windows build's
+`com.audioshare.usbcompanion`, version code 3 or newer, `debuggable=false`, and
+the exact foreground-playback permission allowlist; a wrong-key, debug,
+over-privileged, or unsigned package is rejected. Set the Windows build's
 `AUDIOSHARE_COMPANION_CERT_SHA256` to the 64-hex certificate digest printed by
 `apksigner`, never to the APK file hash.
 At runtime the Windows host also compares the installed base APK SHA-256 with

@@ -34,5 +34,20 @@ jobs:
       - name: Validate device smoke-test script
         run: python3 -m py_compile tools/device_protocol_smoke.py
 
+      - name: Create ephemeral CI-only release identity
+        run: |
+          keytool -genkeypair -noprompt \
+            -keystore "$RUNNER_TEMP/audioshare-ci-release.jks" \
+            -storetype JKS \
+            -storepass audioshare-ci-only \
+            -keypass audioshare-ci-only \
+            -alias audioshare-ci \
+            -keyalg RSA -keysize 3072 -validity 2 \
+            -dname "CN=AudioShare CI only"
+          echo "AUDIOSHARE_KEYSTORE_PATH=$RUNNER_TEMP/audioshare-ci-release.jks" >> "$GITHUB_ENV"
+          echo "AUDIOSHARE_KEYSTORE_PASSWORD=audioshare-ci-only" >> "$GITHUB_ENV"
+          echo "AUDIOSHARE_KEY_ALIAS=audioshare-ci" >> "$GITHUB_ENV"
+          echo "AUDIOSHARE_KEY_PASSWORD=audioshare-ci-only" >> "$GITHUB_ENV"
+
       - name: Test, lint, and assemble
         run: ./gradlew clean testDebugUnitTest lintRelease assembleDebug assembleRelease --no-daemon --max-workers=1

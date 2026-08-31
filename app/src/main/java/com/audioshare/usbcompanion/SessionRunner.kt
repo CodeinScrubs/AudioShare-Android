@@ -70,7 +70,7 @@ class SessionRunner(
             var lastSequence = first.sequence
             while (running.get()) {
                 val frame = WireProtocol.readFrame(localClient.inputStream) ?: break
-                if (frame.sequence < lastSequence) throw ProtocolException("Sequence moved backwards")
+                WireProtocol.requireStrictlyIncreasingSequence(lastSequence, frame.sequence)
                 lastSequence = frame.sequence
                 when (frame.type) {
                     WireProtocol.Type.PCM -> playback.enqueue(frame.payload)

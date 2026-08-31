@@ -23,6 +23,7 @@ internal class LiveEdgePcmQueue(
     data class Snapshot(
         val chunks: Int,
         val frames: Long,
+        val highWaterFrames: Long,
     )
 
     private val lock = ReentrantLock()
@@ -30,6 +31,7 @@ internal class LiveEdgePcmQueue(
     private val chunks = ArrayDeque<ByteArray>()
     private val maximumBufferedFrames: Long
     private var queuedFrames = 0L
+    private var highWaterFrames = 0L
 
     init {
         require(bytesPerFrame > 0)
@@ -43,10 +45,9 @@ internal class LiveEdgePcmQueue(
     }
 
     /** Returns the number of complete frames discarded while accepting [payload]. */
-    fun offer(payload: ByteArray): Long {
+    fun offerOwned(payload: ByteArray): Long {
         require(payload.isNotEmpty() && payload.size % bytesPerFrame == 0)
-        val copy = payload.copyOf()
-        val incomingFrames = copy.size.toLong() / bytesPerFrame
+        val incomingFrames = payload.size.toLong() / bytesPerFrame
         return lock.withLock {
             var discardedFrames = 0L
             while (
@@ -58,8 +59,9 @@ internal class LiveEdgePcmQueue(
                 queuedFrames -= frames
                 discardedFrames += frames
             }
-            chunks.addLast(copy)
+            chunks.addLast(payload)
             queuedFrames += incomingFrames
+            highWaterFrames = maxOf(highWaterFrames, queuedFrames)
             notEmpty.signal()
             discardedFrames
         }
@@ -80,16 +82,23 @@ internal class LiveEdgePcmQueue(
     }
 
     fun snapshot(): Snapshot = lock.withLock {
-        Snapshot(chunks = chunks.size, frames = queuedFrames)
+        Snapshot(
+            chunks = chunks.size,
+            frames = queuedFrames,
+            highWaterFrames = highWaterFrames,
+        )
     }
 
-    fun clear() = lock.withLock {
+    /** Clears queued audio and returns the number of complete frames discarded. */
+    fun discardAll(): Long = lock.withLock {
+        val discardedFrames = queuedFrames
         chunks.clear()
         queuedFrames = 0L
+        discardedFrames
     }
 
     companion object {
-        const val DEFAULT_MAXIMUM_BUFFERED_MILLIS = 80
+        const val DEFAULT_MAXIMUM_BUFFERED_MILLIS = 40
         private const val HARD_MAXIMUM_CHUNKS = 32
     }
 }

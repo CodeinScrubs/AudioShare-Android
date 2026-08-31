@@ -9,6 +9,8 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 class PlaybackService : Service(), SessionRunner.Listener {
     companion object {
@@ -19,7 +21,11 @@ class PlaybackService : Service(), SessionRunner.Listener {
     }
 
     private val lock = Any()
+    private val sessionExecutor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "AudioShare-SessionLifecycle")
+    }
     private var runner: SessionRunner? = null
+    @Volatile private var destroyed = false
     @Volatile private var state = "Preparing"
 
     override fun onCreate() {
@@ -47,6 +53,7 @@ class PlaybackService : Service(), SessionRunner.Listener {
     private fun startSession(config: SessionConfig) {
         val replacement = SessionRunner(applicationContext, config, this)
         val previous = synchronized(lock) {
+            if (destroyed) return
             val old = runner
             runner = replacement
             old
@@ -54,13 +61,17 @@ class PlaybackService : Service(), SessionRunner.Listener {
         // Publish the replacement before stopping the old runner. Its final
         // callback is then rejected by object identity even when a restarted
         // host reuses the same small generation number.
-        previous?.close()
-        val stillCurrent = synchronized(lock) { runner === replacement }
-        if (!stillCurrent) {
-            replacement.close()
-            return
+        enqueueLifecycleTask {
+            previous?.close()
+            val stillCurrent = synchronized(lock) {
+                !destroyed && runner === replacement
+            }
+            if (!stillCurrent) {
+                replacement.close()
+            } else {
+                replacement.start()
+            }
         }
-        replacement.start()
     }
 
     private fun stopSession() {
@@ -69,7 +80,7 @@ class PlaybackService : Service(), SessionRunner.Listener {
             runner = null
             old
         }
-        previous?.close()
+        enqueueLifecycleTask { previous?.close() }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -98,12 +109,24 @@ class PlaybackService : Service(), SessionRunner.Listener {
 
     override fun onDestroy() {
         val previous = synchronized(lock) {
+            destroyed = true
             val old = runner
             runner = null
             old
         }
-        previous?.close()
+        enqueueLifecycleTask { previous?.close() }
+        sessionExecutor.shutdown()
         super.onDestroy()
+    }
+
+    private fun enqueueLifecycleTask(task: () -> Unit) {
+        try {
+            sessionExecutor.execute(task)
+        } catch (_: RejectedExecutionException) {
+            // Android can deliver a final stop callback after onDestroy has
+            // begun. Closing synchronously is safer than leaking a session.
+            task()
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

@@ -21,7 +21,18 @@ class BridgeActivity : Activity() {
     private fun startReceiverAndFinish() {
         val serviceIntent = Intent(this, PlaybackService::class.java).apply {
             action = PlaybackService.ACTION_START_SESSION
-            putExtras(intent.extras ?: Bundle.EMPTY)
+            putExtra(
+                SessionConfig.EXTRA_SOCKET_NAME,
+                intent.getStringExtra(SessionConfig.EXTRA_SOCKET_NAME),
+            )
+            putExtra(
+                SessionConfig.EXTRA_TOKEN_HEX,
+                intent.getStringExtra(SessionConfig.EXTRA_TOKEN_HEX),
+            )
+            putExtra(
+                SessionConfig.EXTRA_GENERATION,
+                intent.getLongExtra(SessionConfig.EXTRA_GENERATION, -1L),
+            )
         }
         startForegroundService(serviceIntent)
         finishAndRemoveTask()

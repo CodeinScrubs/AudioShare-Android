@@ -3,25 +3,28 @@ package com.audioshare.usbcompanion
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.os.Build
 import android.os.Process
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.math.max
 
 class PlaybackWorker(
     private val context: Context,
     private val format: WireProtocol.Hello,
 ) : AutoCloseable {
     private val running = AtomicBoolean(true)
+    private val focusAvailable = AtomicBoolean(false)
     // The socket reader and AudioTrack writer are deliberately decoupled, but
     // stalled audio is never allowed to become permanent lag. The duration-
-    // based queue retains at most an 80 ms live edge (or one indivisible input
+    // based queue retains at most a 40 ms live edge (or one indivisible input
     // chunk) and accounts every older complete frame it drops.
     private val queue = LiveEdgePcmQueue(bytesPerFrame(), format.sampleRate)
     private val ready = CountDownLatch(1)
@@ -30,11 +33,32 @@ class PlaybackWorker(
     private val activeTrack = AtomicReference<AudioTrack?>()
     private val droppedFrames = AtomicLong(0)
     private val receivedFrames = AtomicLong(0)
+    private val focusState = AtomicInteger(FOCUS_NONE)
     private val thread = Thread(::runPlayback, "AudioShare-Playback")
+    private val audioManager = context.getSystemService(AudioManager::class.java)
+    private val audioAttributes = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_MEDIA)
+        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+        .build()
+    private val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+        .setAudioAttributes(audioAttributes)
+        .setAcceptsDelayedFocusGain(false)
+        .setWillPauseWhenDucked(false)
+        .setOnAudioFocusChangeListener(::onAudioFocusChange)
+        .build()
 
     @Volatile
     var configuredBufferFrames: Int = 0
         private set
+
+    @Volatile
+    private var bufferCapacityFrames: Int = 0
+
+    @Volatile
+    private var startThresholdFrames: Int = 0
+
+    @Volatile
+    private var routedDeviceType: Int = 0
 
     init {
         thread.start()
@@ -51,8 +75,19 @@ class PlaybackWorker(
         if (payload.isEmpty() || payload.size % bytesPerFrame() != 0) {
             throw IllegalArgumentException("PCM payload is not frame-aligned")
         }
-        receivedFrames.addAndGet(payload.size.toLong() / bytesPerFrame())
-        droppedFrames.addAndGet(queue.offer(payload))
+        val payloadFrames = payload.size.toLong() / bytesPerFrame()
+        receivedFrames.addAndGet(payloadFrames)
+        if (!focusAvailable.get()) {
+            droppedFrames.addAndGet(payloadFrames)
+            return
+        }
+        droppedFrames.addAndGet(queue.offerOwned(payload))
+        // Close the race in which focus is lost after the first check but
+        // before the queue lock is acquired. No pre-interruption audio may be
+        // replayed after focus returns.
+        if (!focusAvailable.get()) {
+            droppedFrames.addAndGet(queue.discardAll())
+        }
     }
 
     fun statsPayload(): ByteArray {
@@ -64,12 +99,30 @@ class PlaybackWorker(
         runtimeError.get()?.let {
             throw IllegalStateException("AudioTrack playback failed", it)
         }
-        val buffer = java.nio.ByteBuffer.allocate(24).order(java.nio.ByteOrder.BIG_ENDIAN)
-        buffer.putLong(receivedFrames.get())
-        buffer.putLong(droppedFrames.get())
-        buffer.putInt(queue.snapshot().chunks)
-        buffer.putInt(configuredBufferFrames)
-        return buffer.array()
+        val snapshot = queue.snapshot()
+        val track = activeTrack.get()
+        val underruns = try {
+            track?.underrunCount ?: 0
+        } catch (_: IllegalStateException) {
+            0
+        }
+        return WireProtocol.encodePlaybackStats(
+            WireProtocol.PlaybackStats(
+                receivedFrames = receivedFrames.get(),
+                droppedFrames = droppedFrames.get(),
+                queueDepth = snapshot.chunks,
+                bufferFrames = configuredBufferFrames,
+                queueFrames = snapshot.frames.saturatedInt(),
+                bufferCapacityFrames = bufferCapacityFrames,
+                startThresholdFrames = startThresholdFrames,
+                underrunCount = underruns,
+                routedDeviceType = routedDeviceType,
+                focusState = focusState.get(),
+                mediaVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC),
+                mediaVolumeMax = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
+                queueHighWaterFrames = snapshot.highWaterFrames.saturatedInt(),
+            ),
+        )
     }
 
     private fun runPlayback() {
@@ -87,14 +140,13 @@ class PlaybackWorker(
                 AudioFormat.ENCODING_PCM_16BIT,
             )
             if (minimumBytes <= 0) throw IllegalStateException("Invalid AudioTrack minimum buffer: $minimumBytes")
-            val capacityBytes = max(minimumBytes * 2, WireProtocol.MAX_PCM_PAYLOAD * 4)
+            val bufferPlan = planPlaybackBuffer(
+                sampleRate = format.sampleRate,
+                bytesPerFrame = bytesPerFrame(),
+                minimumBytes = minimumBytes,
+            )
             track = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build(),
-                )
+                .setAudioAttributes(audioAttributes)
                 .setAudioFormat(
                     AudioFormat.Builder()
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
@@ -103,15 +155,38 @@ class PlaybackWorker(
                         .build(),
                 )
                 .setTransferMode(AudioTrack.MODE_STREAM)
-                .setBufferSizeInBytes(capacityBytes)
+                .setBufferSizeInBytes(bufferPlan.capacityBytes)
                 .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
                 .build()
             if (track.state != AudioTrack.STATE_INITIALIZED) {
                 throw IllegalStateException("AudioTrack is not initialized")
             }
             activeTrack.set(track)
+            bufferCapacityFrames = track.bufferCapacityInFrames
+            val effectiveBufferFrames = track.setBufferSizeInFrames(
+                minOf(bufferPlan.effectiveBufferFrames, bufferCapacityFrames),
+            )
+            if (effectiveBufferFrames <= 0) {
+                throw IllegalStateException(
+                    "Android rejected AudioTrack buffer size: $effectiveBufferFrames",
+                )
+            }
             configuredBufferFrames = track.bufferSizeInFrames
+            startThresholdFrames = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val threshold = track.setStartThresholdInFrames(
+                    minOf(bufferPlan.startThresholdFrames, configuredBufferFrames),
+                )
+                if (threshold <= 0) {
+                    throw IllegalStateException(
+                        "Android rejected AudioTrack start threshold: $threshold",
+                    )
+                }
+                track.startThresholdInFrames
+            } else {
+                configuredBufferFrames
+            }
             val speakerId = requireBuiltInSpeaker(track)
+            requestAudioFocus()
             track.play()
             awaitPlaybackReady(track, speakerId)
             ready.countDown()
@@ -124,6 +199,12 @@ class PlaybackWorker(
                 var offset = 0
                 var zeroWrites = 0
                 while (offset < chunk.size && running.get()) {
+                    if (!focusAvailable.get()) {
+                        droppedFrames.addAndGet(
+                            (chunk.size - offset).toLong() / bytesPerFrame(),
+                        )
+                        break
+                    }
                     val written = track.write(chunk, offset, chunk.size - offset, AudioTrack.WRITE_BLOCKING)
                     if (written < 0) throw IllegalStateException("AudioTrack write failed: $written")
                     if (written == 0) {
@@ -145,6 +226,8 @@ class PlaybackWorker(
             runtimeError.compareAndSet(null, error)
             ready.countDown()
         } finally {
+            focusAvailable.set(false)
+            audioManager.abandonAudioFocusRequest(focusRequest)
             activeTrack.compareAndSet(track, null)
             try {
                 track?.pause()
@@ -159,7 +242,6 @@ class PlaybackWorker(
     }
 
     private fun requireBuiltInSpeaker(track: AudioTrack): Int {
-        val audioManager = context.getSystemService(AudioManager::class.java)
         val speaker = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
             .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
             ?: throw IllegalStateException("This Android device has no built-in speaker output")
@@ -167,6 +249,66 @@ class PlaybackWorker(
             throw IllegalStateException("Android rejected the built-in speaker route")
         }
         return speaker.id
+    }
+
+    private fun requestAudioFocus() {
+        val result = audioManager.requestAudioFocus(focusRequest)
+        if (result != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+            throw IllegalStateException("Android denied audio focus")
+        }
+        focusState.set(FOCUS_GAINED)
+        focusAvailable.set(true)
+    }
+
+    private fun onAudioFocusChange(change: Int) {
+        when (change) {
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                focusState.set(FOCUS_GAINED)
+                activeTrack.get()?.let { track ->
+                    try {
+                        track.setVolume(1.0f)
+                        if (track.playState != AudioTrack.PLAYSTATE_PLAYING) track.play()
+                        focusAvailable.set(true)
+                    } catch (error: IllegalStateException) {
+                        runtimeError.compareAndSet(null, error)
+                    }
+                }
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                focusState.set(FOCUS_DUCKED)
+                focusAvailable.set(true)
+                try {
+                    activeTrack.get()?.setVolume(DUCK_VOLUME)
+                } catch (error: IllegalStateException) {
+                    runtimeError.compareAndSet(null, error)
+                }
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                focusState.set(FOCUS_TRANSIENT_LOSS)
+                suspendForFocusLoss()
+            }
+            AudioManager.AUDIOFOCUS_LOSS -> {
+                focusState.set(FOCUS_PERMANENT_LOSS)
+                suspendForFocusLoss()
+                runtimeError.compareAndSet(
+                    null,
+                    IllegalStateException("Android audio focus was lost"),
+                )
+            }
+        }
+    }
+
+    private fun suspendForFocusLoss() {
+        focusAvailable.set(false)
+        droppedFrames.addAndGet(queue.discardAll())
+        try {
+            activeTrack.get()?.let { track ->
+                track.pause()
+                track.flush()
+            }
+        } catch (error: IllegalStateException) {
+            runtimeError.compareAndSet(null, error)
+        }
     }
 
     private fun awaitPlaybackReady(track: AudioTrack, speakerId: Int) {
@@ -193,6 +335,7 @@ class PlaybackWorker(
                 nextPrimeWrite = now + TimeUnit.MILLISECONDS.toNanos(10)
             }
             val routed = track.routedDevice
+            routedDeviceType = routed?.type ?: 0
             if (routed != null &&
                 (routed.id != speakerId || routed.type != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
             ) {
@@ -224,6 +367,7 @@ class PlaybackWorker(
         nowNanos: Long,
     ) {
         val routed = track.routedDevice
+        routedDeviceType = routed?.type ?: 0
         if (routed?.id == speakerId && routed.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) return
         if (routed != null) {
             throw IllegalStateException(
@@ -264,6 +408,17 @@ class PlaybackWorker(
         }
         thread.interrupt()
         thread.join(3_000)
-        queue.clear()
+        droppedFrames.addAndGet(queue.discardAll())
+    }
+
+    private fun Long.saturatedInt(): Int = coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+
+    companion object {
+        const val FOCUS_NONE = 0
+        const val FOCUS_GAINED = 1
+        const val FOCUS_DUCKED = 2
+        const val FOCUS_TRANSIENT_LOSS = 3
+        const val FOCUS_PERMANENT_LOSS = 4
+        private const val DUCK_VOLUME = 0.2f
     }
 }

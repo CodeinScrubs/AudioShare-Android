@@ -3,6 +3,7 @@ package com.audioshare.usbcompanion
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -130,6 +131,59 @@ class WireProtocolTest {
         assertEquals(WireProtocol.Type.PING, WireProtocol.readFrame(input)!!.type)
         assertEquals(WireProtocol.Type.STOP, WireProtocol.readFrame(input)!!.type)
         assertNull(WireProtocol.readFrame(input))
+    }
+
+    @Test
+    fun encodesEnhancedPlaybackDiagnosticsWithoutChangingLegacyPrefix() {
+        val payload = WireProtocol.encodePlaybackStats(
+            WireProtocol.PlaybackStats(
+                receivedFrames = 1,
+                droppedFrames = 2,
+                queueDepth = 3,
+                bufferFrames = 4,
+                queueFrames = 5,
+                bufferCapacityFrames = 6,
+                startThresholdFrames = 7,
+                underrunCount = 8,
+                routedDeviceType = 9,
+                focusState = 10,
+                mediaVolume = 11,
+                mediaVolumeMax = 12,
+                queueHighWaterFrames = 13,
+            ),
+        )
+        val input = java.io.DataInputStream(payload.inputStream())
+
+        assertEquals(WireProtocol.ENHANCED_STATS_PAYLOAD_SIZE, payload.size)
+        assertEquals(1L, input.readLong())
+        assertEquals(2L, input.readLong())
+        assertEquals(3, input.readInt())
+        assertEquals(4, input.readInt())
+        assertEquals(5, input.readInt())
+        assertEquals(6, input.readInt())
+        assertEquals(7, input.readInt())
+        assertEquals(8, input.readInt())
+        assertEquals(9, input.readInt())
+        assertEquals(10, input.readInt())
+        assertEquals(11, input.readInt())
+        assertEquals(12, input.readInt())
+        assertEquals(13, input.readInt())
+        assertTrue(input.available() == 0)
+    }
+
+    @Test(expected = ProtocolException::class)
+    fun rejectsDuplicateInboundSequence() {
+        WireProtocol.requireStrictlyIncreasingSequence(previous = 7, next = 7)
+    }
+
+    @Test(expected = ProtocolException::class)
+    fun rejectsDecreasingInboundSequence() {
+        WireProtocol.requireStrictlyIncreasingSequence(previous = 7, next = 6)
+    }
+
+    @Test
+    fun acceptsIncreasingInboundSequence() {
+        WireProtocol.requireStrictlyIncreasingSequence(previous = 7, next = 8)
     }
 
     private fun helloPayload(

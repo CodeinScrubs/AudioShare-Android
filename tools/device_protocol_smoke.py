@@ -244,13 +244,49 @@ def run(args: argparse.Namespace) -> None:
         frame_type, stats_sequence, payload = read_frame(stream)
         if frame_type == ERROR:
             raise RuntimeError(f"companion playback error: {payload.decode('utf-8', 'replace')}")
-        if frame_type != STATS or stats_sequence != sequence or len(payload) != 24:
+        if frame_type != STATS or stats_sequence != sequence or len(payload) not in (24, 60):
             raise RuntimeError("companion did not return valid STATS")
-        received, dropped, queue_depth, reported_buffer = struct.unpack(">QQII", payload)
+        received, dropped, queue_depth, reported_buffer = struct.unpack(">QQII", payload[:24])
         if received != total_frames or reported_buffer != buffer_frames:
             raise RuntimeError("companion playback counters are inconsistent")
+        queue_frames = capacity_frames = start_threshold_frames = underruns = 0
+        routed_device_type = focus_state = media_volume = media_volume_max = 0
+        queue_high_water_frames = 0
+        if len(payload) == 60:
+            (
+                queue_frames,
+                capacity_frames,
+                start_threshold_frames,
+                underruns,
+                routed_device_type,
+                focus_state,
+                media_volume,
+                media_volume_max,
+                queue_high_water_frames,
+            ) = struct.unpack(">IIIIIIIII", payload[24:])
+            if not (0 < start_threshold_frames <= reported_buffer <= capacity_frames):
+                raise RuntimeError(
+                    "invalid AudioTrack tuning: "
+                    f"threshold={start_threshold_frames} "
+                    f"buffer={reported_buffer} capacity={capacity_frames}"
+                )
+            if routed_device_type != 2 or focus_state != 1:
+                raise RuntimeError(
+                    "unexpected Android playback state: "
+                    f"route={routed_device_type} focus={focus_state}"
+                )
+            if media_volume > media_volume_max:
+                raise RuntimeError(
+                    f"invalid media volume: {media_volume}/{media_volume_max}"
+                )
         if dropped != 0:
-            raise RuntimeError(f"companion dropped {dropped} PCM frames")
+            raise RuntimeError(
+                "companion dropped PCM frames: "
+                f"dropped={dropped} queue={queue_depth}/{queue_frames} "
+                f"buffer={reported_buffer}/{capacity_frames} "
+                f"threshold={start_threshold_frames} underruns={underruns} "
+                f"route={routed_device_type} focus={focus_state}"
+            )
 
         sequence += 1
         send_frame(stream, PING, sequence)
@@ -275,7 +311,11 @@ def run(args: argparse.Namespace) -> None:
         print(
             "DEVICE_PROTOCOL_SMOKE_OK "
             f"serial={args.serial} frames={received} dropped={dropped} "
-            f"queue={queue_depth} buffer={buffer_frames} wake_lock={wake_lock_seen} "
+            f"queue={queue_depth}/{queue_frames} buffer={buffer_frames}/{capacity_frames} "
+            f"threshold={start_threshold_frames} underruns={underruns} "
+            f"queue_high_water={queue_high_water_frames} route={routed_device_type} "
+            f"focus={focus_state} volume={media_volume}/{media_volume_max} "
+            f"wake_lock={wake_lock_seen} "
             f"screen_off={screen_off_verified} service_stopped=True forward_removed=True"
         )
     finally:
