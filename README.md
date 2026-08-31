@@ -56,9 +56,10 @@ manual gates before the release candidate is promoted to stable. See
 - A launched service stops if the host does not connect or authenticate.
   Its connection watchdog closes only the listening socket and cannot race a
   client that was accepted at the deadline.
-- If Android rejects the foreground playback service, the launch bridge keeps
-  the ADB activity result explicitly failed with the reason so Windows reports
-  the service-start problem instead of waiting for a generic handshake timeout.
+- If Android rejects the foreground playback service, the launch bridge records
+  an explicit exception reason in Android/ADB diagnostics. Android does not
+  guarantee that every vendor propagates an Activity exception through
+  `am start -W`, so Windows also retains a bounded handshake timeout.
 
 ## Build
 

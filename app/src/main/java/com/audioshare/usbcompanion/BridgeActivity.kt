@@ -38,9 +38,10 @@ class BridgeActivity : Activity() {
             startForegroundService(serviceIntent)
             finishAndRemoveTask()
         } catch (error: RuntimeException) {
-            // Keep the ADB `am start -W` result explicitly failed and include a
-            // useful reason instead of letting the host wait for a handshake
-            // timeout when Android rejects foreground-service startup.
+            // Preserve an explicit reason in Android's process/ADB diagnostics.
+            // Some Android builds report the Activity failure to `am start -W`;
+            // others only expose it through logcat, so the Windows host still
+            // retains its bounded connection timeout as the final fallback.
             finishAndRemoveTask()
             throw IllegalStateException(
                 "Android refused to start the playback service: " +
