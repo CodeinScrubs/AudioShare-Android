@@ -18,6 +18,15 @@ Evidence label: **HARDWARE TESTED** for the items explicitly listed below.
 - USB heartbeat round-trip time: 10 ms.
 - Android dropped frames: 0.
 
+The permanently signed `1.0.0-rc.1` APK was then installed on the same phone.
+Two authenticated 10-second screen-off protocol runs each delivered 480,000
+frames with zero drops and zero underruns, `route=2` (built-in speaker),
+`focus=1` (gained), the session wake lock present, and exact service/forward
+cleanup. A longer strict run was invalidated when Android reported biometric
+wake reason 17 and turned the panel on; targeted power-state instrumentation
+attributed that wake to face/fingerprint handling rather than an AudioShare wake
+request. The uninstrumented ten-minute screen-off gate remains open.
+
 The diagnostic screenshot and tester report prove the initial real-phone
 Windows capture, USB transport, companion installation, and audible playback
 path on this device. They do not by themselves prove a latency percentile,
