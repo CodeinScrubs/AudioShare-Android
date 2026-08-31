@@ -88,9 +88,10 @@ readiness, READY, STATS, heartbeat, enforced built-in-speaker routing,
 wake-lock visibility, STOP, and exact forward/service cleanup. Headless virtual
 audio is not a zero-drop timing oracle: a fresh 10-second run completed the
 protocol with route/focus state valid but reported virtual-audio underruns and
-dropped frames. A physical Samsung is still required to prove audible speaker
-output, the actual USB cable, device-specific foreground policy, reconnect,
-measured latency, zero-drop behavior, and endurance.
+dropped frames. The initial physical Samsung run now proves audible output over
+the actual USB cable with zero visible drops in its captured diagnostic snapshot.
+Device-specific screen-off policy, repeated reconnect, measured latency, and
+endurance remain open physical-device gates.
 Locking an already-streaming cold emulator can briefly stall its virtual
 `AudioTrack`; the bounded live-edge queue intentionally counts and discards stale
 frames in that case instead of preserving permanent playback delay.
