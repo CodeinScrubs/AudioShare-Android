@@ -27,13 +27,16 @@ forward from a randomized Windows loopback port to a randomized Android
 abstract Unix-domain socket, and streams framed PCM to a foreground media
 playback service.
 
-Current phase: version-code 6 public release candidate. The complete Windows to
-USB to built-in-speaker path is hardware tested on a Samsung Galaxy A52s running
-Android 14 with global-system capture, a 10 ms host queue high-water mark, and
-zero visible host/Android drops in the initial audible run. Screen-off endurance,
-cable reconnect cycling, measured latency, and the two-hour run remain explicit
-manual gates before the release candidate is promoted to stable. See
-[`docs/HARDWARE_TEST_RESULTS.md`](docs/HARDWARE_TEST_RESULTS.md).
+Current phase: version-code 7 (`1.0.0-rc.4`) public release candidate. RC4
+preserves nested playback failures, fixes a reproduced playback-thread startup
+race, and causes the matching Windows host to stop once (rather than reconnect
+in a loop) when phone-local media takes Android audio focus. The complete
+Windows-to-USB-to-built-in-speaker path is hardware tested on a Samsung Galaxy
+A52s running Android 14 with global-system capture, a 10 ms host queue
+high-water mark, and zero visible host/Android drops in the initial audible
+run. Screen-off endurance, cable reconnect cycling, measured latency, and the
+two-hour run remain explicit manual gates before the release candidate is
+promoted to stable. See [`docs/HARDWARE_TEST_RESULTS.md`](docs/HARDWARE_TEST_RESULTS.md).
 
 ## Security and privacy contract
 

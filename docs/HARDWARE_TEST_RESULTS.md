@@ -33,6 +33,31 @@ path on this device. They do not by themselves prove a latency percentile,
 screen-off continuity, repeated reconnect recovery, memory stability, or
 long-run endurance.
 
+## 2026-08-31: RC4 playback and focus-recovery check
+
+The permanently signed `1.0.0-rc.4` companion (version code 7) was exercised
+through the authenticated ADB-forward protocol harness on the same authorized
+Galaxy A52s. A 60-second stream delivered 2,880,000 frames with zero Android
+drops, zero underruns, confirmed built-in-speaker route (`route=2`), gained
+media focus (`focus=1`), and an active session wake lock. Stopping the harness
+removed the foreground service and its exact ADB forward. A shorter 15-second
+run also delivered 720,000 frames with zero drops; its two initial underruns
+were not present in the longer run.
+
+As a targeted failure test, Samsung Music was started during the protocol run.
+The companion sent the terminal cause
+`AudioTrack playback failed: Android audio focus was lost` back to the harness.
+A separate Windows supervisor regression proves that this exact cause becomes
+an actionable phone-media error without another companion launch or ADB
+forward. That Windows policy assertion is automated test evidence, not a claim
+that the complete Windows UI path was exercised during the Samsung Music run.
+
+This confirms the RC4 companion's focus-error propagation on this phone and the
+host's no-reconnect-loop policy in automated regression tests. It does not
+prove every OEM's audio-focus policy, the complete Windows UI path, screen-off
+continuity, repeated USB recovery, latency percentiles, restricted-PC behavior,
+memory stability, or endurance.
+
 ## Remaining promotion gates
 
 - Ten-minute continuous playback with the phone screen off and final diagnostics.
