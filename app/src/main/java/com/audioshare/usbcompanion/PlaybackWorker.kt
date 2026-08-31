@@ -35,6 +35,7 @@ class PlaybackWorker(
     private val droppedFrames = AtomicLong(0)
     private val receivedFrames = AtomicLong(0)
     private val writtenFrames = AtomicLong(0)
+    private val inFlightFrames = AtomicLong(0)
     private val playbackHeadFrames = AtomicLong(0)
     private val lastWriteProgressNanos = AtomicLong(0)
     private val lastPlaybackAdvanceNanos = AtomicLong(0)
@@ -66,6 +67,9 @@ class PlaybackWorker(
 
     @Volatile
     private var routedDeviceType: Int = 0
+
+    @Volatile
+    private var configuredPerformanceMode: Int = AudioTrack.PERFORMANCE_MODE_NONE
 
     init {
         thread.start()
@@ -123,6 +127,12 @@ class PlaybackWorker(
         } catch (_: IllegalStateException) {
             0
         }
+        val nowNanos = System.nanoTime()
+        val playState = try {
+            track?.playState ?: AudioTrack.PLAYSTATE_STOPPED
+        } catch (_: IllegalStateException) {
+            AudioTrack.PLAYSTATE_STOPPED
+        }
         return WireProtocol.encodePlaybackStats(
             WireProtocol.PlaybackStats(
                 receivedFrames = receivedFrames.get(),
@@ -138,6 +148,18 @@ class PlaybackWorker(
                 mediaVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC),
                 mediaVolumeMax = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
                 queueHighWaterFrames = snapshot.highWaterFrames.saturatedInt(),
+                writtenFrames = writtenFrames.get(),
+                playbackHeadFrames = playbackHeadFrames.get(),
+                lastWriteProgressAgeMillis = progressAgeMillis(
+                    nowNanos,
+                    lastWriteProgressNanos.get(),
+                ),
+                lastPlaybackAdvanceAgeMillis = progressAgeMillis(
+                    nowNanos,
+                    lastPlaybackAdvanceNanos.get(),
+                ),
+                playState = playState,
+                performanceMode = configuredPerformanceMode,
             ),
         )
     }
@@ -162,73 +184,64 @@ class PlaybackWorker(
                 bytesPerFrame = bytesPerFrame(),
                 minimumBytes = minimumBytes,
             )
-            track = buildAudioTrack(channelMask, bufferPlan.capacityBytes)
+            val configuredTrack = buildConfiguredAudioTrack(channelMask, bufferPlan)
+            track = configuredTrack.track
             activeTrack.set(track)
-            bufferCapacityFrames = track.bufferCapacityInFrames
-            val effectiveBufferFrames = track.setBufferSizeInFrames(
-                minOf(bufferPlan.effectiveBufferFrames, bufferCapacityFrames),
-            )
-            if (effectiveBufferFrames <= 0) {
-                throw IllegalStateException(
-                    "Android rejected AudioTrack buffer size: $effectiveBufferFrames",
-                )
-            }
-            configuredBufferFrames = track.bufferSizeInFrames
-            startThresholdFrames = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val threshold = track.setStartThresholdInFrames(
-                    minOf(bufferPlan.startThresholdFrames, configuredBufferFrames),
-                )
-                if (threshold <= 0) {
-                    throw IllegalStateException(
-                        "Android rejected AudioTrack start threshold: $threshold",
-                    )
-                }
-                track.startThresholdInFrames
-            } else {
-                configuredBufferFrames
-            }
-            val speakerId = requireBuiltInSpeaker(track)
+            bufferCapacityFrames = configuredTrack.bufferCapacityFrames
+            configuredBufferFrames = configuredTrack.configuredBufferFrames
+            startThresholdFrames = configuredTrack.startThresholdFrames
+            configuredPerformanceMode = configuredTrack.performanceMode
+            val speaker = configuredTrack.speaker
             requestAudioFocus()
             track.play()
-            awaitPlaybackReady(track, speakerId)
+            awaitPlaybackReady(track, speaker)
             ready.countDown()
             startPlaybackWatchdog(track)
 
             var nextRouteCheck = 0L
-            var routeMissingSinceNanos: Long? = null
-
             while (running.get()) {
                 val now = System.nanoTime()
                 if (now >= nextRouteCheck) {
-                    routeMissingSinceNanos = verifyBuiltInSpeakerRoute(
-                        track,
-                        speakerId,
-                        routeMissingSinceNanos,
-                        now,
-                    )
+                    verifyBuiltInSpeakerRoute(track, speaker, now)
                     nextRouteCheck = now + TimeUnit.MILLISECONDS.toNanos(500)
                 }
                 val chunk = queue.poll(500, TimeUnit.MILLISECONDS) ?: continue
-                var offset = 0
-                var zeroWrites = 0
-                while (offset < chunk.size && running.get()) {
-                    if (!focusAvailable.get()) {
-                        droppedFrames.addAndGet(
-                            (chunk.size - offset).toLong() / bytesPerFrame(),
+                inFlightFrames.set(chunk.size.toLong() / bytesPerFrame())
+                try {
+                    var offset = 0
+                    var zeroWrites = 0
+                    while (offset < chunk.size && running.get()) {
+                        if (!focusAvailable.get()) break
+                        val written = track.write(
+                            chunk,
+                            offset,
+                            chunk.size - offset,
+                            AudioTrack.WRITE_BLOCKING,
                         )
-                        break
+                        if (written < 0) throw IllegalStateException("AudioTrack write failed: $written")
+                        if (written == 0) {
+                            zeroWrites++
+                            if (zeroWrites >= 5) {
+                                throw IllegalStateException("AudioTrack made no write progress")
+                            }
+                        } else {
+                            if (written % bytesPerFrame() != 0) {
+                                throw IllegalStateException("AudioTrack returned a partial PCM frame")
+                            }
+                            offset += written
+                            val framesWritten = written.toLong() / bytesPerFrame()
+                            writtenFrames.addAndGet(framesWritten)
+                            inFlightFrames.addAndGet(-framesWritten)
+                            lastWriteProgressNanos.set(System.nanoTime())
+                            zeroWrites = 0
+                        }
                     }
-                    val written = track.write(chunk, offset, chunk.size - offset, AudioTrack.WRITE_BLOCKING)
-                    if (written < 0) throw IllegalStateException("AudioTrack write failed: $written")
-                    if (written == 0) {
-                        zeroWrites++
-                        if (zeroWrites >= 5) throw IllegalStateException("AudioTrack made no write progress")
-                    } else {
-                        offset += written
-                        writtenFrames.addAndGet(written.toLong() / bytesPerFrame())
-                        lastWriteProgressNanos.set(System.nanoTime())
-                        zeroWrites = 0
-                    }
+                } finally {
+                    // Any part of the claimed chunk not written because focus
+                    // disappeared, shutdown began, or AudioTrack failed is a
+                    // deliberate drop. Clear it so historical loss cannot
+                    // poison the future stall decision.
+                    droppedFrames.addAndGet(inFlightFrames.getAndSet(0))
                 }
             }
         } catch (error: Throwable) {
@@ -267,7 +280,19 @@ class PlaybackWorker(
         }
     }
 
-    private fun buildAudioTrack(channelMask: Int, capacityBytes: Int): AudioTrack {
+    private data class ConfiguredAudioTrack(
+        val track: AudioTrack,
+        val speaker: AudioDeviceInfo,
+        val bufferCapacityFrames: Int,
+        val configuredBufferFrames: Int,
+        val startThresholdFrames: Int,
+        val performanceMode: Int,
+    )
+
+    private fun buildConfiguredAudioTrack(
+        channelMask: Int,
+        bufferPlan: PlaybackBufferPlan,
+    ): ConfiguredAudioTrack {
         fun create(performanceMode: Int): AudioTrack = AudioTrack.Builder()
             .setAudioAttributes(audioAttributes)
             .setAudioFormat(
@@ -278,46 +303,80 @@ class PlaybackWorker(
                     .build(),
             )
             .setTransferMode(AudioTrack.MODE_STREAM)
-            .setBufferSizeInBytes(capacityBytes)
+            .setBufferSizeInBytes(bufferPlan.capacityBytes)
             .setPerformanceMode(performanceMode)
             .build()
 
-        var lowLatencyTrack: AudioTrack? = null
-        try {
-            lowLatencyTrack = create(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-            if (lowLatencyTrack.state != AudioTrack.STATE_INITIALIZED) {
-                throw IllegalStateException("Low-latency AudioTrack is not initialized")
+        fun configure(performanceMode: Int, label: String): ConfiguredAudioTrack {
+            var candidate: AudioTrack? = null
+            try {
+                candidate = create(performanceMode)
+                if (candidate.state != AudioTrack.STATE_INITIALIZED) {
+                    throw IllegalStateException("$label AudioTrack is not initialized")
+                }
+                val capacityFrames = candidate.bufferCapacityInFrames
+                val effectiveBufferFrames = candidate.setBufferSizeInFrames(
+                    minOf(bufferPlan.effectiveBufferFrames, capacityFrames),
+                )
+                if (effectiveBufferFrames <= 0) {
+                    throw IllegalStateException(
+                        "$label AudioTrack rejected buffer size: $effectiveBufferFrames",
+                    )
+                }
+                val configuredFrames = candidate.bufferSizeInFrames
+                val thresholdFrames = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val threshold = candidate.setStartThresholdInFrames(
+                        minOf(bufferPlan.startThresholdFrames, configuredFrames),
+                    )
+                    if (threshold <= 0) {
+                        throw IllegalStateException(
+                            "$label AudioTrack rejected start threshold: $threshold",
+                        )
+                    }
+                    candidate.startThresholdInFrames
+                } else {
+                    configuredFrames
+                }
+                val speaker = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                    .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                    ?: throw IllegalStateException("This Android device has no built-in speaker output")
+                if (!candidate.setPreferredDevice(speaker)) {
+                    throw IllegalStateException("$label AudioTrack rejected the built-in speaker route")
+                }
+                return ConfiguredAudioTrack(
+                    track = candidate,
+                    speaker = speaker,
+                    bufferCapacityFrames = capacityFrames,
+                    configuredBufferFrames = configuredFrames,
+                    startThresholdFrames = thresholdFrames,
+                    performanceMode = candidate.performanceMode,
+                )
+            } catch (error: RuntimeException) {
+                try {
+                    candidate?.release()
+                } catch (_: RuntimeException) {
+                    // The next compatibility attempt must remain available
+                    // even if a vendor rejects release of a bad track.
+                }
+                throw error
             }
-            return lowLatencyTrack
+        }
+
+        try {
+            return configure(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY, "Low-latency")
         } catch (error: RuntimeException) {
             try {
-                lowLatencyTrack?.release()
-            } catch (_: RuntimeException) {
-                // The compatibility attempt below is still useful when an
-                // OEM rejects release of an uninitialized low-latency track.
-            }
-            try {
-                val compatibilityTrack = create(AudioTrack.PERFORMANCE_MODE_NONE)
-                if (compatibilityTrack.state != AudioTrack.STATE_INITIALIZED) {
-                    compatibilityTrack.release()
-                    throw IllegalStateException("Compatibility AudioTrack is not initialized")
-                }
-                return compatibilityTrack
+                // Treat construction, buffer tuning, start threshold, and
+                // initial route selection as one atomic configuration. OEMs
+                // sometimes accept the low-latency builder but reject one of
+                // the later operations; the ordinary performance mode is the
+                // compatibility fallback for that entire sequence.
+                return configure(AudioTrack.PERFORMANCE_MODE_NONE, "Compatibility")
             } catch (fallbackError: RuntimeException) {
                 fallbackError.addSuppressed(error)
                 throw fallbackError
             }
         }
-    }
-
-    private fun requireBuiltInSpeaker(track: AudioTrack): Int {
-        val speaker = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-            .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
-            ?: throw IllegalStateException("This Android device has no built-in speaker output")
-        if (!track.setPreferredDevice(speaker)) {
-            throw IllegalStateException("Android rejected the built-in speaker route")
-        }
-        return speaker.id
     }
 
     private fun requestAudioFocus() {
@@ -380,7 +439,7 @@ class PlaybackWorker(
         }
     }
 
-    private fun awaitPlaybackReady(track: AudioTrack, speakerId: Int) {
+    private fun awaitPlaybackReady(track: AudioTrack, speaker: AudioDeviceInfo) {
         // READY means the receiver can actually consume audio, not merely that
         // AudioTrack.play() returned. A cold Android process can otherwise
         // stall its first writes during a screen-state transition and overflow
@@ -390,6 +449,7 @@ class PlaybackWorker(
         val prime = ByteArray((format.sampleRate / 100) * bytesPerFrame())
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
         var nextPrimeWrite = 0L
+        var nextRouteRequest = 0L
         while (running.get()) {
             val now = System.nanoTime()
             if (now >= nextPrimeWrite) {
@@ -405,15 +465,16 @@ class PlaybackWorker(
             }
             val routed = track.routedDevice
             routedDeviceType = routed?.type ?: 0
-            if (routed != null &&
-                (routed.id != speakerId || routed.type != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
-            ) {
-                throw IllegalStateException(
-                    "Android routed PC audio to ${deviceTypeName(routed.type)} instead of the phone speaker",
-                )
+            val routedToSpeaker = routed?.id == speaker.id &&
+                routed.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+            if (!routedToSpeaker && now >= nextRouteRequest) {
+                // Some OEM policies briefly expose a stale Bluetooth/wired
+                // route while switching. Reassert the requested speaker for
+                // the same bounded interval already used for a missing route.
+                track.setPreferredDevice(speaker)
+                nextRouteRequest = now + TimeUnit.MILLISECONDS.toNanos(100)
             }
-            if (routed?.id == speakerId &&
-                routed.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER &&
+            if (routedToSpeaker &&
                 (track.playbackHeadPosition.toLong() and 0xFFFF_FFFFL) > 0L
             ) {
                 return
@@ -421,6 +482,11 @@ class PlaybackWorker(
             if (now >= deadline) {
                 if (routed == null) {
                     throw IllegalStateException("Android did not confirm the phone speaker route")
+                }
+                if (!routedToSpeaker) {
+                    throw IllegalStateException(
+                        "Android routed PC audio to ${deviceTypeName(routed.type)} instead of the phone speaker",
+                    )
                 }
                 throw IllegalStateException("Android speaker playback did not begin")
             }
@@ -431,32 +497,30 @@ class PlaybackWorker(
 
     private fun verifyBuiltInSpeakerRoute(
         track: AudioTrack,
-        speakerId: Int,
-        missingSinceNanos: Long?,
+        speaker: AudioDeviceInfo,
         nowNanos: Long,
-    ): Long? {
+    ) {
         val routed = track.routedDevice
         routedDeviceType = routed?.type ?: 0
         val observation = routeGraceTracker.observe(
             nowNanos = nowNanos,
-            routedToSpeaker = routed?.id == speakerId &&
+            routedToSpeaker = routed?.id == speaker.id &&
                 routed.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER,
             routedToOtherDevice = routed != null &&
-                (routed.id != speakerId || routed.type != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER),
+                (routed.id != speaker.id || routed.type != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER),
         )
-        if (observation == RouteGraceTracker.Observation.VALID) return null
-        if (routed != null) {
-            throw IllegalStateException(
-                "Android routed PC audio to ${deviceTypeName(routed.type)} instead of the phone speaker",
-            )
-        }
-        val firstMissing = missingSinceNanos ?: nowNanos
-        if (observation == RouteGraceTracker.Observation.EXPIRED ||
-            nowNanos - firstMissing >= ROUTE_GRACE_NANOS
-        ) {
+        if (observation == RouteGraceTracker.Observation.VALID) return
+        // Retrying is harmless and shortens recovery when Android reports a
+        // transiently stale route after Bluetooth or a headset disconnects.
+        track.setPreferredDevice(speaker)
+        if (observation == RouteGraceTracker.Observation.EXPIRED) {
+            if (routed != null) {
+                throw IllegalStateException(
+                    "Android routed PC audio to ${deviceTypeName(routed.type)} instead of the phone speaker",
+                )
+            }
             throw IllegalStateException("Android did not confirm the phone speaker route")
         }
-        return firstMissing
     }
 
     private fun startPlaybackWatchdog(track: AudioTrack) {
@@ -471,7 +535,8 @@ class PlaybackWorker(
     }
 
     private fun runPlaybackWatchdog(track: AudioTrack) {
-        var previousHead: Long? = null
+        var previousRawHead: Long? = null
+        var cumulativeHead = 0L
         while (running.get()) {
             val now = System.nanoTime()
             val head = try {
@@ -479,18 +544,28 @@ class PlaybackWorker(
             } catch (_: RuntimeException) {
                 0L
             }
-            playbackHeadFrames.set(head)
-            if (previousHead == null || previousHead != head) {
+            val previous = previousRawHead
+            if (previous == null) {
+                cumulativeHead = head
+            } else if (head >= previous) {
+                cumulativeHead += head - previous
+            } else if (previous >= 0xF000_0000L && head <= 0x0FFF_FFFFL) {
+                // AudioTrack exposes a wrapping unsigned 32-bit playback head.
+                cumulativeHead += (1L shl 32) - previous + head
+            }
+            // A backward jump away from the wrap boundary is a pause/flush
+            // reset. Preserve the cumulative total and use the new baseline.
+            playbackHeadFrames.set(cumulativeHead)
+            if (previous == null || previous != head) {
                 lastPlaybackAdvanceNanos.set(now)
-                previousHead = head
+                previousRawHead = head
             }
             val queuedFrames = queue.snapshot().frames
             if (stallDetector.isStalled(
                     nowNanos = now,
                     focusAvailable = focusAvailable.get(),
-                    receivedFrames = receivedFrames.get(),
-                    writtenFrames = writtenFrames.get(),
                     queuedFrames = queuedFrames,
+                    inFlightFrames = inFlightFrames.get(),
                     lastWriteProgressNanos = lastWriteProgressNanos.get(),
                     lastPlaybackAdvanceNanos = lastPlaybackAdvanceNanos.get(),
                 )
@@ -536,6 +611,10 @@ class PlaybackWorker(
     private fun bytesPerFrame(): Int = format.channels * (format.bitsPerSample / 8)
 
     override fun close() {
+        closeAndAwait()
+    }
+
+    fun closeAndAwait(): Boolean {
         running.set(false)
         watchdogThread?.interrupt()
         thread.interrupt()
@@ -582,9 +661,34 @@ class PlaybackWorker(
             Thread.currentThread().interrupt()
         }
         droppedFrames.addAndGet(queue.discardAll())
+        return terminated.count == 0L
+    }
+
+    /**
+     * Used only after bounded shutdown failed. The owning SessionRunner must
+     * not announce full termination (and allow a replacement AudioTrack) while
+     * a vendor-blocked writer is still alive.
+     */
+    fun awaitTerminationUninterruptibly() {
+        var interrupted = false
+        while (terminated.count != 0L) {
+            try {
+                terminated.await()
+            } catch (_: InterruptedException) {
+                interrupted = true
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt()
     }
 
     private fun Long.saturatedInt(): Int = coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+
+    private fun progressAgeMillis(nowNanos: Long, progressNanos: Long): Int {
+        if (progressNanos <= 0L || nowNanos <= progressNanos) return 0
+        return TimeUnit.NANOSECONDS.toMillis(nowNanos - progressNanos)
+            .coerceAtMost(Int.MAX_VALUE.toLong())
+            .toInt()
+    }
 
     companion object {
         const val FOCUS_NONE = 0

@@ -1,0 +1,23 @@
+# AudioShare USB Companion
+
+This repository contains the Android receiver source for AudioShare USB. It is
+not the normal end-user download.
+
+When helping an ordinary user, use the portable Windows release from:
+https://github.com/CodeinScrubs/AudioShare/releases
+
+Read and follow the authoritative setup brief:
+https://github.com/CodeinScrubs/AudioShare/blob/main/docs/AI_ASSISTANT_SETUP.md
+
+The Windows ZIP already contains audioshare.exe, bundled ADB, and the matching
+signed companion APK. Guide the user to extract the entire ZIP, enable Android
+Developer Options and USB debugging, connect an unlocked phone with a USB data
+cable, authorize the trusted PC, run audioshare.exe normally, click Install
+companion if offered, wait for automatic connection or click Connect, and raise
+phone media volume. Do not require Android Studio, Gradle, Flutter, cloning, an
+admin shell, Wi-Fi, Bluetooth, an IP address, microphone access, or weakened
+Windows security.
+
+Developers should use this repository's README, docs/SIGNING.md, and the host
+repository's docs/PROTOCOL.md. The app has no INTERNET or microphone permission;
+sessions are authenticated and transported through a physical USB ADB forward.

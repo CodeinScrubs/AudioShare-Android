@@ -2,13 +2,32 @@
 
 Native Android receiver for the customized AudioShare Windows host.
 
+## Looking for the app to use?
+
+Ordinary users should **not** clone or build this Android repository and do not
+need Android Studio. Download the complete portable Windows ZIP from the
+[AudioShare Windows releases](https://github.com/CodeinScrubs/AudioShare/releases).
+It already includes the matching signed companion APK and installs it through
+the Windows app's explicit **Install companion** button.
+
+For beginner, step-by-step help, give your AI assistant both repository links
+and ask it to read the
+[AI setup brief](https://github.com/CodeinScrubs/AudioShare/blob/main/docs/AI_ASSISTANT_SETUP.md):
+
+```text
+Help me set up AudioShare USB as a beginner using the ready-made portable
+Windows release, not source code or Android Studio:
+https://github.com/CodeinScrubs/AudioShare
+https://github.com/CodeinScrubs/AudioShare-Android
+```
+
 The companion is intentionally not a network application. The Windows host
 launches it over an already-authorized USB ADB connection, creates an ADB
 forward from a randomized Windows loopback port to a randomized Android
 abstract Unix-domain socket, and streams framed PCM to a foreground media
 playback service.
 
-Current phase: version-code 5 public release candidate. The complete Windows to
+Current phase: version-code 6 public release candidate. The complete Windows to
 USB to built-in-speaker path is hardware tested on a Samsung Galaxy A52s running
 Android 14 with global-system capture, a 10 ms host queue high-water mark, and
 zero visible host/Android drops in the initial audible run. Screen-off endurance,
@@ -31,9 +50,9 @@ manual gates before the release candidate is promoted to stable. See
   Android's foreground-service Task Manager.
 - Playback verifies the actual Android audio route after writing starts and
   fails visibly if the OS routes PC audio anywhere except the built-in speaker.
-  A later temporary loss of route information gets a fresh two-second grace
-  window instead of reusing the startup deadline, so normal Android audio
-  policy transitions do not terminate a long-running session prematurely.
+  A temporary missing or stale Bluetooth/wired route gets a two-second recovery
+  window with repeated speaker requests, so normal Android audio-policy
+  transitions do not terminate a long-running session prematurely.
 - A playback watchdog observes write progress and the Android playback head;
   if PC audio remains pending while both stop advancing for two seconds, the
   session is terminated with an explicit playback-stalled error instead of
@@ -42,10 +61,11 @@ manual gates before the release candidate is promoted to stable. See
   and resumes only at the live edge; ducking lowers the track volume; permanent
   loss is reported to Windows as a playback error.
 - Disconnect interrupts any in-flight `AudioTrack` write and waits only for
-  bounded worker termination, so teardown cannot retain the session wake lock
-  behind a stalled route.
+  bounded worker termination. A replacement session cannot start until the old
+  worker has conclusively stopped, preventing overlapping tracks and sockets.
 - The receiver prefers Android's low-latency `AudioTrack` mode and retries with
-  the compatibility performance mode if an OEM rejects low-latency creation.
+  compatibility performance mode if an OEM rejects construction, buffer
+  tuning, start threshold, or initial speaker routing.
 - A partial wake lock is held only while a USB session is waiting or streaming,
   then released, so playback can continue reliably with the screen off.
 - Each session uses a 256-bit nonce and a unique abstract socket name.
@@ -79,7 +99,8 @@ $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 the release task. The receiver uses a 40 ms target buffer without going below
 Android's reported minimum and, on API 31+, a 20 ms playback start threshold.
 The exact capacity, effective buffer, threshold, underruns, route, focus, media
-volume, and queue high-water mark are returned in STATS diagnostics.
+  volume, queue high-water mark, write progress, cumulative playback head,
+  play state, and actual performance mode are returned in STATS diagnostics.
 
 The real app and ADB-forwarded protocol can be exercised on an authorized device
 or emulator (the command sends a deliberately quiet test tone):
@@ -115,3 +136,5 @@ Release APKs require an external stable signing key; see
 [`docs/SIGNING.md`](docs/SIGNING.md). Tagged releases are built with the stable
 project identity stored in GitHub Actions secrets; private signing material is
 never committed. This project is licensed under LGPL-3.0-or-later; see `LICENSE`.
+
+AudioShare USB custom edition was created by Shayan SalehiRad.

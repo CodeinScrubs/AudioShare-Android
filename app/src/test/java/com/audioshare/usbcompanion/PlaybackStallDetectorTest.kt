@@ -13,9 +13,22 @@ class PlaybackStallDetectorTest {
             detector.isStalled(
                 nowNanos = 3_000_000_000L,
                 focusAvailable = true,
-                receivedFrames = 100,
-                writtenFrames = 100,
                 queuedFrames = 0,
+                inFlightFrames = 0,
+                lastWriteProgressNanos = 0,
+                lastPlaybackAdvanceNanos = 0,
+            ),
+        )
+    }
+
+    @Test
+    fun historicalDropsDoNotTurnLaterSilenceIntoAStall() {
+        assertFalse(
+            detector.isStalled(
+                nowNanos = 3_000_000_000L,
+                focusAvailable = true,
+                queuedFrames = 0,
+                inFlightFrames = 0,
                 lastWriteProgressNanos = 0,
                 lastPlaybackAdvanceNanos = 0,
             ),
@@ -28,9 +41,8 @@ class PlaybackStallDetectorTest {
             detector.isStalled(
                 nowNanos = 3_000_000_000L,
                 focusAvailable = true,
-                receivedFrames = 100,
-                writtenFrames = 50,
                 queuedFrames = 10,
+                inFlightFrames = 0,
                 lastWriteProgressNanos = 2_000_000_001L,
                 lastPlaybackAdvanceNanos = 0,
             ),
@@ -39,9 +51,22 @@ class PlaybackStallDetectorTest {
             detector.isStalled(
                 nowNanos = 3_000_000_000L,
                 focusAvailable = true,
-                receivedFrames = 100,
-                writtenFrames = 50,
                 queuedFrames = 10,
+                inFlightFrames = 0,
+                lastWriteProgressNanos = 0,
+                lastPlaybackAdvanceNanos = 0,
+            ),
+        )
+    }
+
+    @Test
+    fun inFlightWriteIsPendingEvenWhenTheQueueIsEmpty() {
+        assertTrue(
+            detector.isStalled(
+                nowNanos = 3_000_000_000L,
+                focusAvailable = true,
+                queuedFrames = 0,
+                inFlightFrames = 10,
                 lastWriteProgressNanos = 0,
                 lastPlaybackAdvanceNanos = 0,
             ),
@@ -54,9 +79,8 @@ class PlaybackStallDetectorTest {
             detector.isStalled(
                 nowNanos = 3_000_000_000L,
                 focusAvailable = false,
-                receivedFrames = 100,
-                writtenFrames = 50,
                 queuedFrames = 10,
+                inFlightFrames = 0,
                 lastWriteProgressNanos = 0,
                 lastPlaybackAdvanceNanos = 0,
             ),

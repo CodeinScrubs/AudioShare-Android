@@ -150,11 +150,17 @@ class WireProtocolTest {
                 mediaVolume = 11,
                 mediaVolumeMax = 12,
                 queueHighWaterFrames = 13,
+                writtenFrames = 14,
+                playbackHeadFrames = 15,
+                lastWriteProgressAgeMillis = 16,
+                lastPlaybackAdvanceAgeMillis = 17,
+                playState = 18,
+                performanceMode = 19,
             ),
         )
         val input = java.io.DataInputStream(payload.inputStream())
 
-        assertEquals(WireProtocol.ENHANCED_STATS_PAYLOAD_SIZE, payload.size)
+        assertEquals(WireProtocol.PLAYBACK_PROGRESS_STATS_PAYLOAD_SIZE, payload.size)
         assertEquals(1L, input.readLong())
         assertEquals(2L, input.readLong())
         assertEquals(3, input.readInt())
@@ -168,6 +174,12 @@ class WireProtocolTest {
         assertEquals(11, input.readInt())
         assertEquals(12, input.readInt())
         assertEquals(13, input.readInt())
+        assertEquals(14L, input.readLong())
+        assertEquals(15L, input.readLong())
+        assertEquals(16, input.readInt())
+        assertEquals(17, input.readInt())
+        assertEquals(18, input.readInt())
+        assertEquals(19, input.readInt())
         assertTrue(input.available() == 0)
     }
 

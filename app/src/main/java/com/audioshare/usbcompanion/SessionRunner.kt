@@ -25,6 +25,8 @@ class SessionRunner(
     }
 
     private val running = AtomicBoolean(true)
+    private val terminated = java.util.concurrent.CountDownLatch(1)
+    private var started = false
     private val scheduler = Executors.newSingleThreadScheduledExecutor { task ->
         Thread(task, "AudioShare-Watchdog")
     }
@@ -36,14 +38,31 @@ class SessionRunner(
     @Volatile private var server: LocalServerSocket? = null
     @Volatile private var client: LocalSocket? = null
 
-    fun start() = thread.start()
+    @Synchronized
+    fun start(): Boolean {
+        if (started || !running.get()) {
+            if (!started) terminated.countDown()
+            return false
+        }
+        started = true
+        return try {
+            thread.start()
+            true
+        } catch (error: RuntimeException) {
+            terminated.countDown()
+            throw error
+        }
+    }
 
     private fun runSession() {
         var playback: PlaybackWorker? = null
         var connectTimeout: ScheduledFuture<*>? = null
         var errorMessage: String? = null
         try {
-            wakeLock.acquire()
+            // A non-reference-counted timeout is a final leak guard if an OEM
+            // wedges every normal cleanup path. Twelve hours is well above
+            // the supported two-hour soak gate and ordinary listening use.
+            wakeLock.acquire(WAKE_LOCK_TIMEOUT_MILLIS)
             listener.onState(this, "Waiting for PC")
             val localServer = LocalServerSocket(config.socketName)
             server = localServer
@@ -110,11 +129,21 @@ class SessionRunner(
         } finally {
             running.set(false)
             connectTimeout?.cancel(false)
-            playback?.close()
+            val playbackStopped = playback?.closeAndAwait() ?: true
+            if (!playbackStopped) {
+                // Keep this session's termination latch closed until the old
+                // AudioTrack thread really exits. PlaybackService therefore
+                // times out and refuses to overlap a replacement session.
+                playback?.awaitTerminationUninterruptibly()
+            }
             closeTransport()
             scheduler.shutdownNow()
             if (wakeLock.isHeld) wakeLock.release()
-            listener.onStopped(this, errorMessage)
+            try {
+                listener.onStopped(this, errorMessage)
+            } finally {
+                terminated.countDown()
+            }
         }
     }
 
@@ -151,10 +180,32 @@ class SessionRunner(
         }.take(240)
 
     override fun close() {
-        if (!running.getAndSet(false)) return
+        closeAndAwait(SESSION_SHUTDOWN_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+    }
+
+    fun closeAndAwait(timeout: Long, unit: TimeUnit): Boolean {
+        running.set(false)
         closeTransport()
-        thread.interrupt()
-        thread.join(3_000)
         scheduler.shutdownNow()
+        val shouldInterrupt = synchronized(this) {
+            if (!started) {
+                terminated.countDown()
+                false
+            } else {
+                true
+            }
+        }
+        if (shouldInterrupt) thread.interrupt()
+        return try {
+            terminated.await(timeout, unit)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+    }
+
+    companion object {
+        private val WAKE_LOCK_TIMEOUT_MILLIS = TimeUnit.HOURS.toMillis(12)
+        val SESSION_SHUTDOWN_TIMEOUT_MILLIS = TimeUnit.SECONDS.toMillis(8)
     }
 }

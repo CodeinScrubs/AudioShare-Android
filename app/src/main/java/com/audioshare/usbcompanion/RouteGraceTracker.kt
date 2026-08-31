@@ -1,29 +1,28 @@
 package com.audioshare.usbcompanion
 
 /**
- * Keeps a short, renewable grace period for transiently missing route data.
- * Android can briefly report no routed device while rebuilding its audio
- * policy. A missing route is only fatal when it remains missing continuously.
+ * Keeps a short, renewable grace period for transiently invalid route data.
+ * Android can briefly report no route or an old route while rebuilding its
+ * audio policy. Either condition is fatal only when it remains continuous.
  */
 internal class RouteGraceTracker(
     private val graceNanos: Long,
 ) {
-    private var missingSinceNanos: Long? = null
+    private var invalidSinceNanos: Long? = null
 
     fun observe(
         nowNanos: Long,
         routedToSpeaker: Boolean,
         routedToOtherDevice: Boolean,
     ): Observation {
+        require(!(routedToSpeaker && routedToOtherDevice))
         if (routedToSpeaker) {
-            missingSinceNanos = null
+            invalidSinceNanos = null
             return Observation.VALID
         }
-        if (routedToOtherDevice) {
-            missingSinceNanos = null
-            return Observation.WRONG_DEVICE
-        }
-        val since = missingSinceNanos ?: nowNanos.also { missingSinceNanos = it }
+        // Missing and explicitly wrong routes receive the same bounded
+        // recovery window; the separate booleans reject ambiguous callers.
+        val since = invalidSinceNanos ?: nowNanos.also { invalidSinceNanos = it }
         return if (nowNanos - since >= graceNanos) {
             Observation.EXPIRED
         } else {
@@ -35,6 +34,5 @@ internal class RouteGraceTracker(
         VALID,
         GRACE,
         EXPIRED,
-        WRONG_DEVICE,
     }
 }

@@ -17,6 +17,7 @@ object WireProtocol {
     const val HELLO_PAYLOAD_SIZE = 40
     const val LEGACY_STATS_PAYLOAD_SIZE = 24
     const val ENHANCED_STATS_PAYLOAD_SIZE = 60
+    const val PLAYBACK_PROGRESS_STATS_PAYLOAD_SIZE = 92
 
     enum class Type(val id: Int) {
         HELLO(1),
@@ -58,10 +59,16 @@ object WireProtocol {
         val mediaVolume: Int,
         val mediaVolumeMax: Int,
         val queueHighWaterFrames: Int,
+        val writtenFrames: Long,
+        val playbackHeadFrames: Long,
+        val lastWriteProgressAgeMillis: Int,
+        val lastPlaybackAdvanceAgeMillis: Int,
+        val playState: Int,
+        val performanceMode: Int,
     )
 
     fun encodePlaybackStats(stats: PlaybackStats): ByteArray =
-        ByteBuffer.allocate(ENHANCED_STATS_PAYLOAD_SIZE)
+        ByteBuffer.allocate(PLAYBACK_PROGRESS_STATS_PAYLOAD_SIZE)
             .order(ByteOrder.BIG_ENDIAN)
             .putLong(stats.receivedFrames)
             .putLong(stats.droppedFrames)
@@ -76,6 +83,12 @@ object WireProtocol {
             .putInt(stats.mediaVolume)
             .putInt(stats.mediaVolumeMax)
             .putInt(stats.queueHighWaterFrames)
+            .putLong(stats.writtenFrames)
+            .putLong(stats.playbackHeadFrames)
+            .putInt(stats.lastWriteProgressAgeMillis)
+            .putInt(stats.lastPlaybackAdvanceAgeMillis)
+            .putInt(stats.playState)
+            .putInt(stats.performanceMode)
             .array()
 
     fun requireStrictlyIncreasingSequence(previous: Int, next: Int) {

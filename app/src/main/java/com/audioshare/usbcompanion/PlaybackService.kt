@@ -62,14 +62,30 @@ class PlaybackService : Service(), SessionRunner.Listener {
         // callback is then rejected by object identity even when a restarted
         // host reuses the same small generation number.
         enqueueLifecycleTask {
-            previous?.close()
+            val previousStopped = previous?.closeAndAwait(
+                SessionRunner.SESSION_SHUTDOWN_TIMEOUT_MILLIS,
+                java.util.concurrent.TimeUnit.MILLISECONDS,
+            ) ?: true
+            if (!previousStopped) {
+                replacement.close()
+                synchronized(lock) {
+                    if (runner === replacement) runner = null
+                }
+                stopWithError("Previous audio session did not stop cleanly; reconnect USB and try again")
+                return@enqueueLifecycleTask
+            }
             val stillCurrent = synchronized(lock) {
                 !destroyed && runner === replacement
             }
             if (!stillCurrent) {
                 replacement.close()
             } else {
-                replacement.start()
+                if (!replacement.start()) {
+                    synchronized(lock) {
+                        if (runner === replacement) runner = null
+                    }
+                    stopWithError("Audio receiver stopped before it could start")
+                }
             }
         }
     }
