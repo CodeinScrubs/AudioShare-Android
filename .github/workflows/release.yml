@@ -79,7 +79,7 @@ jobs:
           apk="app/build/outputs/apk/release/app-release.apk"
           apksigner="$ANDROID_HOME/build-tools/36.1.0/apksigner"
           "$apksigner" verify --verbose --print-certs "$apk"
-          cert_sha="$($apksigner verify --print-certs "$apk" | \
+          cert_sha="$("$apksigner" verify --print-certs "$apk" | \
             sed -n 's/^Signer #1 certificate SHA-256 digest: //p')"
           test "${#cert_sha}" -eq 64
           mkdir -p dist
@@ -104,8 +104,8 @@ jobs:
             --title "AudioShare USB Companion $GITHUB_REF_NAME" \
             --notes-file "docs/releases/$GITHUB_REF_NAME.md" \
             "${prerelease[@]}" \
-            dist/AudioShare-USB-Companion-$GITHUB_REF_NAME.apk \
-            dist/AudioShare-USB-Companion-$GITHUB_REF_NAME.apk.sha256 \
+            "dist/AudioShare-USB-Companion-$GITHUB_REF_NAME.apk" \
+            "dist/AudioShare-USB-Companion-$GITHUB_REF_NAME.apk.sha256" \
             dist/companion-certificate-sha256.txt
 
       - name: Remove restored signing material

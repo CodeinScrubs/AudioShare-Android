@@ -44,10 +44,12 @@ jobs:
             -alias audioshare-ci \
             -keyalg RSA -keysize 3072 -validity 2 \
             -dname "CN=AudioShare CI only"
-          echo "AUDIOSHARE_KEYSTORE_PATH=$RUNNER_TEMP/audioshare-ci-release.jks" >> "$GITHUB_ENV"
-          echo "AUDIOSHARE_KEYSTORE_PASSWORD=audioshare-ci-only" >> "$GITHUB_ENV"
-          echo "AUDIOSHARE_KEY_ALIAS=audioshare-ci" >> "$GITHUB_ENV"
-          echo "AUDIOSHARE_KEY_PASSWORD=audioshare-ci-only" >> "$GITHUB_ENV"
+          {
+            echo "AUDIOSHARE_KEYSTORE_PATH=$RUNNER_TEMP/audioshare-ci-release.jks"
+            echo "AUDIOSHARE_KEYSTORE_PASSWORD=audioshare-ci-only"
+            echo "AUDIOSHARE_KEY_ALIAS=audioshare-ci"
+            echo "AUDIOSHARE_KEY_PASSWORD=audioshare-ci-only"
+          } >> "$GITHUB_ENV"
 
       - name: Test, lint, and assemble
         run: ./gradlew clean testDebugUnitTest lintRelease assembleDebug assembleRelease --no-daemon --max-workers=1
