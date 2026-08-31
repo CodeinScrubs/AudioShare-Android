@@ -8,8 +8,13 @@ forward from a randomized Windows loopback port to a randomized Android
 abstract Unix-domain socket, and streams framed PCM to a foreground media
 playback service.
 
-Current phase: version-code 3 release candidate pending physical-phone audible
-output, cable reconnect, latency, and long-run acceptance.
+Current phase: version-code 4 public release candidate. The complete Windows to
+USB to built-in-speaker path is hardware tested on a Samsung Galaxy A52s running
+Android 14 with global-system capture, a 10 ms host queue high-water mark, and
+zero visible host/Android drops in the initial audible run. Screen-off endurance,
+cable reconnect cycling, measured latency, and the two-hour run remain explicit
+manual gates before the release candidate is promoted to stable. See
+[`docs/HARDWARE_TEST_RESULTS.md`](docs/HARDWARE_TEST_RESULTS.md).
 
 ## Security and privacy contract
 
@@ -91,5 +96,6 @@ Locking an already-streaming cold emulator can briefly stall its virtual
 frames in that case instead of preserving permanent playback delay.
 
 Release APKs require an external stable signing key; see
-[`docs/SIGNING.md`](docs/SIGNING.md). This project is licensed under
-LGPL-3.0-or-later; see `LICENSE`.
+[`docs/SIGNING.md`](docs/SIGNING.md). Tagged releases are built with the stable
+project identity stored in GitHub Actions secrets; private signing material is
+never committed. This project is licensed under LGPL-3.0-or-later; see `LICENSE`.

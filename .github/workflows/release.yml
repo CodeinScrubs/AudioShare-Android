@@ -1,0 +1,114 @@
+name: Android Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate tag and release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          version_name="$(sed -n "s/^[[:space:]]*versionName = '\([^']*\)'.*/\1/p" app/build.gradle)"
+          test -n "$version_name"
+          test "$GITHUB_REF_NAME" = "v$version_name"
+          test -f "docs/releases/$GITHUB_REF_NAME.md"
+
+      - name: Set up Java
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up and validate Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6
+
+      - name: Install pinned Android SDK components
+        shell: bash
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-36" "build-tools;36.1.0"
+
+      - name: Restore permanent release identity
+        shell: bash
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.AUDIOSHARE_RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.AUDIOSHARE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.AUDIOSHARE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.AUDIOSHARE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${RELEASE_KEYSTORE_BASE64:?missing release keystore secret}"
+          : "${RELEASE_KEYSTORE_PASSWORD:?missing keystore password secret}"
+          : "${RELEASE_KEY_ALIAS:?missing key alias secret}"
+          : "${RELEASE_KEY_PASSWORD:?missing key password secret}"
+          keystore="$RUNNER_TEMP/audioshare-usb-release.jks"
+          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          chmod 600 "$keystore"
+          {
+            echo "AUDIOSHARE_KEYSTORE_PATH=$keystore"
+            echo "AUDIOSHARE_KEYSTORE_PASSWORD=$RELEASE_KEYSTORE_PASSWORD"
+            echo "AUDIOSHARE_KEY_ALIAS=$RELEASE_KEY_ALIAS"
+            echo "AUDIOSHARE_KEY_PASSWORD=$RELEASE_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - name: Test, lint, and build signed release
+        shell: bash
+        run: |
+          ./gradlew clean testDebugUnitTest lintRelease assembleRelease \
+            --no-daemon --max-workers=1
+
+      - name: Verify and stage release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="app/build/outputs/apk/release/app-release.apk"
+          apksigner="$ANDROID_HOME/build-tools/36.1.0/apksigner"
+          "$apksigner" verify --verbose --print-certs "$apk"
+          cert_sha="$($apksigner verify --print-certs "$apk" | \
+            sed -n 's/^Signer #1 certificate SHA-256 digest: //p')"
+          test "${#cert_sha}" -eq 64
+          mkdir -p dist
+          asset="dist/AudioShare-USB-Companion-$GITHUB_REF_NAME.apk"
+          cp "$apk" "$asset"
+          sha256sum "$asset" > "$asset.sha256"
+          printf '%s\n' "$cert_sha" > dist/companion-certificate-sha256.txt
+
+      - name: Publish GitHub prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          prerelease=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "AudioShare USB Companion $GITHUB_REF_NAME" \
+            --notes-file "docs/releases/$GITHUB_REF_NAME.md" \
+            "${prerelease[@]}" \
+            dist/AudioShare-USB-Companion-$GITHUB_REF_NAME.apk \
+            dist/AudioShare-USB-Companion-$GITHUB_REF_NAME.apk.sha256 \
+            dist/companion-certificate-sha256.txt
+
+      - name: Remove restored signing material
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/audioshare-usb-release.jks"

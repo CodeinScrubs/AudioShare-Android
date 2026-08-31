@@ -57,3 +57,24 @@ matching Windows package.
 Keep the same release identity for every version so Android permits compatible
 `adb install -r` updates. Losing the key requires uninstalling the old app and
 performing a new one-time installation.
+
+## Project release identity
+
+The CodeinScrubs release workflow restores the permanent keystore only from the
+following GitHub Actions secrets:
+
+- `AUDIOSHARE_RELEASE_KEYSTORE_BASE64`
+- `AUDIOSHARE_KEYSTORE_PASSWORD`
+- `AUDIOSHARE_KEY_ALIAS`
+- `AUDIOSHARE_KEY_PASSWORD`
+
+The public certificate SHA-256 for the first release identity is:
+
+```text
+23bb6499dbb6aa3610d0a9ee0df9c922d9023e4b7990dc23ac6c1743f215950c
+```
+
+The owner's local keystore and Windows-user-encrypted credential backup live
+outside Git under `C:\Users\Shayan\.android\audioshare-usb-release`. Back up
+the signing identity separately before relying on it for long-term releases;
+the encrypted credential file is tied to the current Windows user profile.
