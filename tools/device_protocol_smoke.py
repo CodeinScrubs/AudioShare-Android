@@ -244,7 +244,7 @@ def run(args: argparse.Namespace) -> None:
         frame_type, stats_sequence, payload = read_frame(stream)
         if frame_type == ERROR:
             raise RuntimeError(f"companion playback error: {payload.decode('utf-8', 'replace')}")
-        if frame_type != STATS or stats_sequence != sequence or len(payload) not in (24, 60):
+        if frame_type != STATS or stats_sequence != sequence or len(payload) not in (24, 60, 92):
             raise RuntimeError("companion did not return valid STATS")
         received, dropped, queue_depth, reported_buffer = struct.unpack(">QQII", payload[:24])
         if received != total_frames or reported_buffer != buffer_frames:
@@ -252,7 +252,10 @@ def run(args: argparse.Namespace) -> None:
         queue_frames = capacity_frames = start_threshold_frames = underruns = 0
         routed_device_type = focus_state = media_volume = media_volume_max = 0
         queue_high_water_frames = 0
-        if len(payload) == 60:
+        written_frames = playback_head_frames = 0
+        last_write_age = last_playback_age = 0
+        play_state = performance_mode = 0
+        if len(payload) >= 60:
             (
                 queue_frames,
                 capacity_frames,
@@ -263,7 +266,7 @@ def run(args: argparse.Namespace) -> None:
                 media_volume,
                 media_volume_max,
                 queue_high_water_frames,
-            ) = struct.unpack(">IIIIIIIII", payload[24:])
+            ) = struct.unpack(">IIIIIIIII", payload[24:60])
             if not (0 < start_threshold_frames <= reported_buffer <= capacity_frames):
                 raise RuntimeError(
                     "invalid AudioTrack tuning: "
@@ -278,6 +281,27 @@ def run(args: argparse.Namespace) -> None:
             if media_volume > media_volume_max:
                 raise RuntimeError(
                     f"invalid media volume: {media_volume}/{media_volume_max}"
+                )
+        if len(payload) == 92:
+            (
+                written_frames,
+                playback_head_frames,
+                last_write_age,
+                last_playback_age,
+                play_state,
+                performance_mode,
+            ) = struct.unpack(">QQIIII", payload[60:])
+            if written_frames > received or playback_head_frames == 0:
+                raise RuntimeError(
+                    "invalid AudioTrack progress counters: "
+                    f"written={written_frames}/{received} head={playback_head_frames}"
+                )
+            # AudioTrack.PLAYSTATE_PLAYING=3; this companion requests either
+            # PERFORMANCE_MODE_NONE=0 or PERFORMANCE_MODE_LOW_LATENCY=1.
+            if play_state != 3 or performance_mode not in (0, 1):
+                raise RuntimeError(
+                    "unexpected AudioTrack runtime state: "
+                    f"play_state={play_state} performance_mode={performance_mode}"
                 )
         if dropped != 0:
             raise RuntimeError(
@@ -315,6 +339,9 @@ def run(args: argparse.Namespace) -> None:
             f"threshold={start_threshold_frames} underruns={underruns} "
             f"queue_high_water={queue_high_water_frames} route={routed_device_type} "
             f"focus={focus_state} volume={media_volume}/{media_volume_max} "
+            f"written={written_frames} head={playback_head_frames} "
+            f"progress_age={last_write_age}/{last_playback_age}ms "
+            f"play_state={play_state} performance_mode={performance_mode} "
             f"wake_lock={wake_lock_seen} "
             f"screen_off={screen_off_verified} service_stopped=True forward_removed=True"
         )

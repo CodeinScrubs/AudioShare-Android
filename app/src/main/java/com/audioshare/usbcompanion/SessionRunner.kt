@@ -14,6 +14,37 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
+/**
+ * Produces the bounded error text sent over the authenticated USB protocol.
+ *
+ * Runtime playback failures are commonly wrapped while crossing worker-thread
+ * boundaries. Preserve their cause chain so the Windows supervisor can tell a
+ * user-action condition (such as phone media taking audio focus) from a
+ * transient transport failure. Protocol and transport errors intentionally
+ * retain their stable, sanitized wording.
+ */
+internal fun sessionErrorMessage(error: Throwable): String {
+    val message = when (error) {
+        is ProtocolException -> error.message ?: "Protocol error"
+        is IOException -> "Transport closed: ${error.message ?: "I/O error"}"
+        else -> {
+            val messages = linkedSetOf<String>()
+            var current: Throwable? = error
+            var depth = 0
+            while (current != null && depth < 8) {
+                messages += current.message?.trim().orEmpty()
+                    .ifEmpty { current.javaClass.simpleName }
+                val next = current.cause
+                if (next === current) break
+                current = next
+                depth++
+            }
+            messages.joinToString(": ")
+        }
+    }
+    return message.take(240)
+}
+
 class SessionRunner(
     private val context: Context,
     private val config: SessionConfig,
@@ -113,7 +144,7 @@ class SessionRunner(
             }
         } catch (error: Throwable) {
             if (running.get()) {
-                errorMessage = safeMessage(error)
+                errorMessage = sessionErrorMessage(error)
                 try {
                     send(
                         WireProtocol.Frame(
@@ -171,13 +202,6 @@ class SessionRunner(
             }
         },
     )
-
-    private fun safeMessage(error: Throwable): String =
-        when (error) {
-            is ProtocolException -> error.message ?: "Protocol error"
-            is IOException -> "Transport closed: ${error.message ?: "I/O error"}"
-            else -> error.message ?: error.javaClass.simpleName
-        }.take(240)
 
     override fun close() {
         closeAndAwait(SESSION_SHUTDOWN_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)

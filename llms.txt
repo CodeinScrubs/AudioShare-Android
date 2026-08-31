@@ -18,6 +18,12 @@ phone media volume. Do not require Android Studio, Gradle, Flutter, cloning, an
 admin shell, Wi-Fi, Bluetooth, an IP address, microphone access, or weakened
 Windows security.
 
+AudioShare owns Android media audio focus while it is acting as the PC speaker.
+If the user starts music or video directly on the phone, the matching Windows
+host stops once with an instruction to stop that phone-local media and click
+Connect again; it must not reconnect repeatedly or claim the silent stream is
+healthy.
+
 Developers should use this repository's README, docs/SIGNING.md, and the host
 repository's docs/PROTOCOL.md. The app has no INTERNET or microphone permission;
 sessions are authenticated and transported through a physical USB ADB forward.

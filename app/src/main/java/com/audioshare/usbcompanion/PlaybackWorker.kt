@@ -40,6 +40,10 @@ class PlaybackWorker(
     private val lastWriteProgressNanos = AtomicLong(0)
     private val lastPlaybackAdvanceNanos = AtomicLong(0)
     private val focusState = AtomicInteger(FOCUS_NONE)
+    // This must be initialized before the worker thread starts below. Kotlin
+    // initializes body properties in source order, so declaring it near the
+    // route-checking methods creates a real startup race.
+    private val routeGraceTracker = RouteGraceTracker(ROUTE_GRACE_NANOS)
     private val thread = Thread(::runPlayback, "AudioShare-Playback")
     private var watchdogThread: Thread? = null
     private val stallDetector = PlaybackStallDetector(PLAYBACK_STALL_TIMEOUT_NANOS)
@@ -591,8 +595,6 @@ class PlaybackWorker(
             }
         }
     }
-
-    private val routeGraceTracker = RouteGraceTracker(ROUTE_GRACE_NANOS)
 
     private fun deviceTypeName(type: Int): String = when (type) {
         AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,

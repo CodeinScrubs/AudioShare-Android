@@ -45,7 +45,7 @@ Get-FileHash .\app\build\outputs\apk\release\app-release.apk -Algorithm SHA256
 Before supplying the result to the Windows release build, run the host
 repository's `tools/verify_companion_apk.ps1`. Packaging requires a valid APK
 signature, the explicitly supplied signer-certificate SHA-256, application ID
-`com.audioshare.usbcompanion`, exactly version code 6, `debuggable=false`, and
+`com.audioshare.usbcompanion`, exactly version code 7, `debuggable=false`, and
 the exact foreground-playback permission allowlist; a wrong-key, debug,
 over-privileged, or unsigned package is rejected. Set the Windows build's
 `AUDIOSHARE_COMPANION_CERT_SHA256` to the 64-hex certificate digest printed by

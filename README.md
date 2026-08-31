@@ -59,7 +59,9 @@ manual gates before the release candidate is promoted to stable. See
   reporting a healthy but silent connection.
 - Playback requests media audio focus. Transient focus loss flushes queued PCM
   and resumes only at the live edge; ducking lowers the track volume; permanent
-  loss is reported to Windows as a playback error.
+  loss is reported to Windows with its exact cause. The matching Windows host
+  stops instead of reconnecting in a loop and tells the user to stop phone-local
+  music/video before clicking Connect again.
 - Disconnect interrupts any in-flight `AudioTrack` write and waits only for
   bounded worker termination. A replacement session cannot start until the old
   worker has conclusively stopped, preventing overlapping tracks and sockets.
