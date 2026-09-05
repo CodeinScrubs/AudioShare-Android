@@ -27,6 +27,12 @@ forward from a randomized Windows loopback port to a randomized Android
 abstract Unix-domain socket, and streams framed PCM to a foreground media
 playback service.
 
+Windows RC5 intentionally bundles this unchanged **Android RC4 / version-code
+7** companion. Download the complete Windows ZIP from the host repository;
+you do not need to build or reinstall the phone app if the matching signed
+companion is already present. For a connected-but-silent PC, follow the
+[host troubleshooting guide](https://github.com/CodeinScrubs/AudioShare/blob/main/docs/TROUBLESHOOTING.md#connected-but-the-phone-is-silent).
+
 Current phase: version-code 7 (`1.0.0-rc.4`) public release candidate. RC4
 preserves nested playback failures, fixes a reproduced playback-thread startup
 race, and causes the matching Windows host to stop once (rather than reconnect
